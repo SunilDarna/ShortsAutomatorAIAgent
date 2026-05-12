@@ -1,0 +1,34 @@
+# 🔐 Secrets & Credentials
+local_secrets.json
+setup_scripts/
+*-key
+
+# 📦 Video Assets (Heavy Files)
+output/
+*.mp4
+*.mkv
+*.webm
+
+# ⚙️ Python Junk
+__pycache__/
+*.py[cod]
+*$py.class
+.venv
+venv/
+ENV/
+
+# 🧩 Node Dependencies
+node_modules/
+
+# 🗃 Project Database
+processed_videos.json
+history.json
+
+# 🍎 Mac Junk
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+Network Trash Folder
+Temporary Items
+.apdisk

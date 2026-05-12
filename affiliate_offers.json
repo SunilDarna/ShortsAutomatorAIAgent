@@ -1,0 +1,26 @@
+{
+    "productivity": {
+        "name": "Jasper AI",
+        "link": "https://jasper.ai/?utm_source=your_id",
+        "description": "AI Writing & Content Assistant",
+        "problem_solved": "Slow content creation, writer's block, manual drafting"
+    },
+    "video_editing": {
+        "name": "Descript",
+        "link": "https://www.descript.com/?utm_source=your_id",
+        "description": "AI Video & Podcast Editor",
+        "problem_solved": "Complex video editing, transcribing, filler word removal"
+    },
+    "marketing": {
+        "name": "AdCreative.ai",
+        "link": "https://www.adcreative.ai/?utm_source=your_id",
+        "description": "Automated Ad Creative Generation",
+        "problem_solved": "High cost of creative testing, slow ad design, low CTR"
+    },
+    "business_automation": {
+        "name": "ManyChat",
+        "link": "https://manychat.com/?utm_source=your_id",
+        "description": "Instagram & WhatsApp Automation",
+        "problem_solved": "Manual DM replies, slow lead follow-up, low engagement"
+    }
+}
