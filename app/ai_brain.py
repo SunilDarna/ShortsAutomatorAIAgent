@@ -9,20 +9,33 @@ from google import genai
 from google.genai import types
 from googleapiclient.discovery import build
 
-CHANNELS = [
-    "UCNJ1Ymd5yFuUPtn21xtRbbw", # AI Explained (Gold Standard)
-    "UCsBjURrPoezykLs9EqgamOA", # Fireship (Retention King)
-    "UCTNDbjZLbTNFtBL3FAXUEQF", # The AI Advantage (Viral Trends) - NEW
-    "UCawZsQWqfGSbCI5yjkdVkTA", # Matthew Berman (LLM Hype) - NEW
-    "UCt6l0E-bBC1Z4d7C3qgh3cA", # ColdFusion (Narrative Tech) - NEW
-    "UChpleBmo18P08aKCIgti38g", # Matt Wolfe (News/Tools)
+# 🌟 Viral Authority Tier (Priority Sources)
+PRIORITY_CHANNELS = [
+    "UCUyDOdBWhC1MCxEjC46d-zw", # Alex Hormozi
+    "UCGq-a57w-aPwyi3pW7XLiHw", # The Diary of a CEO
+    "UCxoRKax_0vHaulMbceZtAwA", # My First Million
+    "UCGX7nGXpz-CmO_Arg-cgJ7A", # Codie Sanchez
+    "UChfo46ZNOV-vtehDc25A1Ug", # Ali Abdaal
+    "UC3ov_5a1a1p4-1p9fL8P0Lw", # Patrick Bet-David (Valuetainment)
+    "UCQ4FNww3XoNgqIlkBqEAVCg", # Iman Gadzhi
+    "UCXC3etwvNkMBGrc6tcwu5oQ", # Noah Kagan
+    "UCa-ckhlKL98F8YXKQ-BALiw", # Graham Stephan
+    "UCctXZhXmG-kf3tlIXgVZUlw", # GaryVee
+]
+
+# ⚙️ Technical & News Tier (Secondary Sources)
+SECONDARY_CHANNELS = [
+    "UCawZsQWqfGSbCI5yjkdVkTA", # Matthew Berman (AI/Tech)
+    "UCTNDbjZLbTNFtBL3FAXUEQF", # The AI Advantage
+    "UCt6l0E-bBC1Z4d7C3qgh3cA", # ColdFusion (Narrative Tech)
+    "UCsBjURrPoezykLs9EqgamOA", # Fireship (High retention tech)
+    "UChpleBmo18P08aKCIgti38g", # Matt Wolfe (AI Tools)
     "UCqcbQf6yw5KzRoDDcZ_wBSw", # Wes Roth (AI News)
+    "UCmZhTGgWGcgQ_zRUsMowPuw", # ByteByteGo (System Design & Architecture)
+    "UCd6MoB9NC6uYN2grvUNT-Zg", # AWS Events / re:Invent (Enterprise Cloud)
+    "UCMxNxyU0h6S0H0t-tL8FzNg", # Y Combinator (Startup Strategy)
+    "UCNJ1Ymd5yFuUPtn21xtRbbw", # AI Explained (Gold Standard)
     "UCCSrPWb7mjVUIPcxSbJ2SSA", # Sam Despo (AI Biz)
-    "UCUyDOdBWhC1MCxEjC46d-zw", # Alex Hormozi (Income Cheat Codes)
-    "UCQ4FNww3XoNgqIlkBqEAVCg", # Iman Gadzhi (Wealth Hype)
-    "UCctXZhXmG-kf3tlIXgVZUlw", # GaryVee (Attention King)
-    "UC2D2CMWXMOVWx7giW1n3LIg", # Huberman Lab (Health/Authority)
-    "UCGq-a57w-aPwyi3pW7XLiHw", # Diary of a CEO (Emotional Hooks)
     "UCnYMOamNKLGVlJgRUbamveA", # Impact Theory (Success Hooks)
     "UCbfYPyITQ-7l4upoX8nvctg"  # Two Minute Papers (Visual AI)
 ]
@@ -45,15 +58,23 @@ def get_local_headers():
 def get_latest_video_from_channels(unused_key=None):
     """ 
     Uses Local Scraper (yt-dlp) to find latest videos.
-    Replaces ScraperAPI to avoid costs/limits.
+    Prioritizes Authority channels before falling back to Secondary tech channels.
     """
-    for attempt in range(15):
-        channel_id = random.choice(CHANNELS)
-        print(f"Local Scraper: Probing channel {channel_id}...")
+    # Attempt priority channels first
+    priority_pool = list(PRIORITY_CHANNELS)
+    random.shuffle(priority_pool)
+    
+    # Combined list for full fallback
+    full_pool = priority_pool + SECONDARY_CHANNELS
+    
+    for attempt, channel_id in enumerate(full_pool):
+        if attempt < len(PRIORITY_CHANNELS):
+             print(f"Local Scraper [PRIORITY]: Probing channel {channel_id}...")
+        else:
+             print(f"Local Scraper [SECONDARY]: Probing channel {channel_id}...")
         
         try:
             channel_url = f"https://www.youtube.com/channel/{channel_id}/videos"
-            # Use python3 -m yt_dlp to ensure it's found
             cmd = [
                 'python3', '-m', 'yt_dlp',
                 '--playlist-items', '1',
@@ -74,7 +95,7 @@ def get_latest_video_from_channels(unused_key=None):
         except Exception as e:
             print(f"Local Scraper Error for {channel_id}: {e}")
             
-    raise Exception("Local Scraper failed to find videos after multiple attempts.")
+    raise Exception("Local Scraper failed to find videos in both tiers.")
 
 from youtube_transcript_api import YouTubeTranscriptApi
 
@@ -122,68 +143,91 @@ def get_transcript(video_url, youtube_api_key, unused_key=None):
         print(f"Local Transcript Fetch failed: {e}")
         raise Exception(f"Failed to fetch transcript: {e}")
 
+def parse_seconds(time_str):
+    parts = time_str.split(':')
+    if len(parts) == 2:
+        return int(parts[0]) * 60 + int(parts[1])
+    return int(time_str)
+
 def extract_task_with_llm(video_url, transcript, llm_api_key, affiliate_offers):
+    """TWO-PASS VIRAL HOOK ENGINE with SEO 2.0 Enhancements."""
     client = genai.Client(api_key=llm_api_key)
     
-    prompt = f"""
-    ROLE: You are an autonomous Affiliate Strategist and "Conversion Architect". Your goal is to maximize Click-Through Rate (CTR) by matching viral content with high-utility software solutions.
-
-    TASK 1: COMPLIANCE & SAFETY (THE "SAFE SHIELD")
-    1. Avoid "Scammy" or "Get Rich Quick" claims.
-    2. Ensure the segment is informative, educational, or transformative.
-    3. Do NOT select segments containing sensitive political, medical, or controversial topics.
-    4. Ensure the Title and Description accurately reflect the video content.
-
-    TASK 2: SMART AFFILIATE MATCHING
-    1. Analyze the Transcript: Identify the specific "Pain Point" or problem discussed in the video.
-    2. Match the Engine: Select the most relevant tool from this list that acts as the immediate mechanical solution:
+    # PASS 1: Identify High-Value Concepts
+    print("AI Brain Pass 1: Identifying high-value concepts...")
+    pass1_prompt = f"""
+    ROLE: Viral Content Strategist.
+    Analyze this transcript and identify the 3 most controversial, counter-intuitive, or high-value business/tech concepts.
+    Return only a JSON list of concepts with approximate start and end timestamps (MM:SS).
+    
+    Example: [{{"concept": "...", "start": "02:10", "end": "04:30"}}, ...]
+    
+    Transcript:
+    {transcript[:15000]}
+    """
+    
+    response1 = client.models.generate_content(model="gemini-flash-latest", contents=pass1_prompt)
+    raw1 = response1.text.strip().replace("```json", "").replace("```", "").strip()
+    concepts = json.loads(raw1)
+    
+    # Pick the first concept for deep analysis
+    target = concepts[0]
+    print(f"AI Brain Pass 2: Zooming in on '{target['concept']}' at {target['start']}...")
+    
+    # PASS 2: Precision Clip Extraction & SEO Engineering
+    pass2_prompt = f"""
+    ROLE: Precision Clip Architect & SEO Engineer.
+    Analyze the dialogue around {target['start']} to {target['end']}.
+    EXTRACT a continuous, coherent sequence strictly between 40 and 57 seconds.
+    
+    TASK 1: VIRAL TITLING
+    Generate 3 title variations. Pick the one with the highest "Curiosity Gap".
+    
+    TASK 2: DYNAMIC TAGGING
+    Generate 15 highly specific SEO tags for this content.
+    
+    TASK 3: CATEGORY SELECTION
+    Select the best Category ID: 
+    - 27 (Education) for tutorials/wisdom.
+    - 28 (Science & Tech) for news/tools.
+    - 22 (People & Blogs) for business/personalities.
+    
+    TASK 4: AFFILIATE MATCHING
     {json.dumps(affiliate_offers, indent=2)}
-
-    TASK 3: SEGMENT EXTRACTION (THE "GOLDEN NUGGET")
-    Identify a high-impact, standalone segment from the transcript.
-    CRITICAL: The duration (end_time minus start_time) MUST be between 30 and 58 seconds. NEVER exceed 58 seconds.
-
-    TASK 4: CONVERSION TRAPS
-    1. Hook Text: A dramatic, scroll-stopping headline for the FIRST 3 seconds (max 5 words).
-    2. Title: Viral, click-worthy title (max 50 chars).
-    3. Description: Start with the affiliate link. Include "#Shorts #AI #Business".
-    4. AI Disclosure: Include "Edited with AI assistance" at the bottom.
-    5. Bridge Text: Overlay text for the final 3 seconds: "Want to automate this? Link in bio"
-    6. Pinned Comment (ENGAGEMENT TRAP): Create a "Keyword Trigger" comment. 
-       Format: "Want to use this [Tool Name]? Comment '[KEYWORD]' below and I'll send you the direct link! 🚀"
-       (The keyword should be short and relevant, e.g. 'AI', 'TOOL', 'BOT').
-
-    Return your answer EXACTLY as a raw JSON object.
-
-    Required JSON Schema:
+    
+    Return EXACTLY this JSON:
     {{
         "start_time": "MM:SS",
         "end_time": "MM:SS",
-        "hook_text": "First 3-sec hook text",
-        "bridge_text": "Final 3-sec bridge text",
-        "title": "Viral Video Title",
-        "suggested_affiliate": "Name of Selected Tool",
-        "youtube_description": "[Affiliate Link] \n[Viral Description] \n#Shorts #AI #Business \n\nEdited with AI assistance.",
-        "pinned_comment": "Keyword trigger comment (Comment '...' for the link!)"
+        "hook_text": "3-sec visual hook",
+        "bridge_text": "Final CTA text",
+        "title": "Winning Viral Title",
+        "tags": ["tag1", "tag2", ...],
+        "category_id": "27",
+        "suggested_affiliate": "...",
+        "youtube_description": "[Link] \n[Viral Hook] \n\nRelated: Watch more AI Business tools on our channel! \n\n#Shorts #AI #Business \n\nEdited with AI assistance.",
+        "pinned_comment": "..."
     }}
     
-    Transcript:
+    Context Segment:
     {transcript}
     """
     
-    response = client.models.generate_content(
-        model="gemini-flash-latest",
-        contents=prompt
-    )
-    raw_text = response.text.strip()
+    response2 = client.models.generate_content(model="gemini-flash-latest", contents=pass2_prompt)
+    raw2 = response2.text.strip().replace("```json", "").replace("```", "").strip()
+    task = json.loads(raw2)
     
-    # Strip markdown if LLM added it anyway
-    if raw_text.startswith("```json"):
-        raw_text = raw_text[7:]
-    if raw_text.endswith("```"):
-        raw_text = raw_text[:-3]
-        
-    return json.loads(raw_text.strip())
+    # VALIDATION: Strictly under 57 seconds
+    s = parse_seconds(task['start_time'])
+    e = parse_seconds(task['end_time'])
+    duration = e - s
+    
+    if duration > 57:
+        task['end_time'] = f"{int((s + 55)/60):02d}:{(s + 55)%60:02d}"
+    elif duration < 30:
+         task['end_time'] = f"{int((s + 45)/60):02d}:{(s + 45)%60:02d}"
+         
+    return task
 
 def generate_autonomous_task(llm_api_key, youtube_api_key, scraper_api_key=None):
     print("AI Brain: Initiating autonomous video sourcing...")

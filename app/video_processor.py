@@ -82,14 +82,15 @@ def process_for_shorts(input_path, output_path, start_time, end_time, bridge_tex
         safe_bridge = wrap_text(bridge_text.replace("'", "'\\\\''").replace(":", "\\:"), 30)
         safe_hook = wrap_text(hook_text.replace("'", "'\\\\''").replace(":", "\\:"), 20)
         
-        # 1. Permanent Subscribe (Higher)
-        sub_filter = f"drawtext=text='SUBSCRIBE':fontfile='{font_path}':fontcolor=white:fontsize=42:box=1:boxcolor=red@0.9:boxborderw=10:x=(w-text_w)/2:y=h-th-300"
+        # 1. Permanent Subscribe (Elevated to 30-40% Safety Zone)
+        # 1920 - 600 = 1320 (Just above the bottom 30% line)
+        sub_filter = f"drawtext=text='SUBSCRIBE':fontfile='{font_path}':fontcolor=white:fontsize=42:box=1:boxcolor=red@0.9:boxborderw=10:x=(w-text_w)/2:y=h-th-600"
         
         # 2. Hook & Bridge
         bridge_filter = f"drawtext=text='{safe_bridge}':fontfile='{font_path}':fontcolor=white:fontsize=48:box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=h-th-150:enable='between(t,{duration-4},{duration})'"
         hook_filter = f"drawtext=text='{safe_hook}':fontfile='{font_path}':fontcolor=yellow:fontsize=64:box=1:boxcolor=black@0.7:boxborderw=15:x=(w-text_w)/2:y=200:enable='between(t,0,3)'"
         
-        # 3. Smart Captions (Transcript Overlay)
+        # 3. Smart Captions (Placed ABOVE Subscribe, within Bottom 40% zone)
         caption_filters = []
         last_cap_end = 0
         if transcript_raw:
@@ -125,7 +126,8 @@ def process_for_shorts(input_path, output_path, start_time, end_time, bridge_tex
                     # Clean text & Wrap
                     txt = wrap_text(e_text.replace("'", "").replace(":", "").strip().upper(), 25)
                     if txt and len(txt) < 100:
-                        f = f"drawtext=text='{txt}':fontfile='{font_path}':fontcolor=white:fontsize=56:box=1:boxcolor=black@0.6:x=(w-text_w)/2:y=(h-th)/2+200:enable='between(t,{rel_start},{rel_end})'"
+                        # Placed strictly above subscribe (y=h-th-750 is approx 1170)
+                        f = f"drawtext=text='{txt}':fontfile='{font_path}':fontcolor=white:fontsize=56:box=1:boxcolor=black@0.6:x=(w-text_w)/2:y=h-th-750:enable='between(t,{rel_start},{rel_end})'"
                         caption_filters.append(f)
         
         all_filters = [sub_filter, bridge_filter, hook_filter] + caption_filters[:40] # Cap at 40 to avoid too long cmd
@@ -152,6 +154,43 @@ def process_for_shorts(input_path, output_path, start_time, end_time, bridge_tex
     
     subprocess.run(cmd, check=True)
     print(f"Final video generated at {output_path}")
+
+def generate_srt(transcript_raw, start_time_str, end_time_str, srt_path):
+    """Generates an SRT file for YouTube SEO indexing."""
+    seg_start = parse_time(start_time_str)
+    seg_end = parse_time(end_time_str)
+    
+    srt_content = ""
+    counter = 1
+    
+    for entry in transcript_raw:
+        e_start = entry.get('start', 0)
+        e_dur = entry.get('duration', 0)
+        e_text = entry.get('text', '')
+        e_end = e_start + e_dur
+        
+        if e_start >= seg_start and e_end <= seg_end:
+            # Relative timing for the clip
+            r_start = e_start - seg_start
+            r_end = e_end - seg_start
+            
+            # Format to HH:MM:SS,mmm
+            def format_srt_time(seconds):
+                hrs, rem = divmod(seconds, 3600)
+                mins, secs = divmod(rem, 60)
+                millis = int((secs - int(secs)) * 1000)
+                return f"{int(hrs):02d}:{int(mins):02d}:{int(secs):02d},{millis:03d}"
+            
+            srt_content += f"{counter}\n"
+            srt_content += f"{format_srt_time(r_start)} --> {format_srt_time(r_end)}\n"
+            srt_content += f"{e_text}\n\n"
+            counter += 1
+            
+    if srt_content:
+        with open(srt_path, "w") as f:
+            f.write(srt_content)
+        return True
+    return False
 
 def create_short(url, start_time, end_time, bridge_text, output_path, hook_text="", transcript_raw=None):
     raw_path = "/tmp/full_video.mp4"
