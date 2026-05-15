@@ -90,7 +90,13 @@ def process_for_shorts(input_path, output_path, start_time, end_time, bridge_tex
         bridge_filter = f"drawtext=text='{safe_bridge}':fontfile='{font_path}':fontcolor=white:fontsize=48:box=1:boxcolor=black@0.5:boxborderw=10:x=(w-text_w)/2:y=h-th-150:enable='between(t,{duration-4},{duration})'"
         hook_filter = f"drawtext=text='{safe_hook}':fontfile='{font_path}':fontcolor=yellow:fontsize=64:box=1:boxcolor=black@0.7:boxborderw=15:x=(w-text_w)/2:y=200:enable='between(t,0,3)'"
         
-        # 3. Smart Captions (Placed ABOVE Subscribe, within Bottom 40% zone)
+        # 3. OPTION 1+2: THUMBNAIL INJECTION (The 'Invisible' Custom Thumbnail)
+        # We create a 0.1s frame at the very start with HUGE text and higher saturation.
+        # Fixed: Narrower wrap (12 chars) to prevent cropping on mobile screens.
+        thumb_text = wrap_text(safe_hook.upper(), 12) 
+        thumb_filter = f"drawtext=text='{thumb_text}':fontfile='{font_path}':fontcolor=white:fontsize=100:line_spacing=20:box=1:boxcolor=red@0.9:boxborderw=30:x=(w-text_w)/2:y=(h-text_h)/2:enable='between(t,0,0.1)',eq=saturation=1.5:brightness=0.1:enable='between(t,0,0.1)'"
+        
+        # 4. Smart Captions (Placed ABOVE Subscribe, within Bottom 40% zone)
         caption_filters = []
         last_cap_end = 0
         if transcript_raw:
@@ -130,7 +136,7 @@ def process_for_shorts(input_path, output_path, start_time, end_time, bridge_tex
                         f = f"drawtext=text='{txt}':fontfile='{font_path}':fontcolor=white:fontsize=56:box=1:boxcolor=black@0.6:x=(w-text_w)/2:y=h-th-750:enable='between(t,{rel_start},{rel_end})'"
                         caption_filters.append(f)
         
-        all_filters = [sub_filter, bridge_filter, hook_filter] + caption_filters[:40] # Cap at 40 to avoid too long cmd
+        all_filters = [thumb_filter, sub_filter, bridge_filter, hook_filter] + caption_filters[:40] # Cap at 40 to avoid too long cmd
         video_filter = f"split[v1][v2];[v1]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=40:10[bg];[v2]scale=1080:-1[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,{','.join(all_filters)}"
     else:
         print("WARNING: 'drawtext' filter not found in local ffmpeg. Skipping text overlay...")
