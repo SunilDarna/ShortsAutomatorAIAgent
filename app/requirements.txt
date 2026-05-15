@@ -1,8 +1,18 @@
+# Core pipeline
 yt-dlp
 google-api-python-client
 google-auth-httplib2
 google-auth-oauthlib
 requests
-boto3
 youtube-transcript-api
 google-genai
+
+# Phase 1: SQLite (stdlib — no install needed)
+# sqlite3 is built into Python 3.x
+
+# Phase 2: Computer Vision (MediaPipe + OpenCV)
+mediapipe
+opencv-python-headless
+
+# Utilities
+boto3
