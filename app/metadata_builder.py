@@ -5,9 +5,7 @@ tags, category ID, and 3-second CTA overlay spec.
 """
 import json
 import os
-import re
-import random
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
 # ──────────────── Affiliate Offer Loader ──────────────────────────────────────
 
@@ -25,7 +23,6 @@ def load_affiliate_offers(path: str = None) -> dict:
 # ──────────────── Semantic Topic → Affiliate Matching ─────────────────────────
 
 TOPIC_CATEGORY_MAP = {
-    # Keyword → affiliate category key
     "ai": "productivity",
     "automation": "business_automation",
     "writing": "productivity",
@@ -48,11 +45,6 @@ TOPIC_CATEGORY_MAP = {
 }
 
 def match_affiliate(script_text: str, offers: dict) -> dict:
-    """
-    Semantically match the script topic to the best affiliate offer.
-    Uses keyword frequency scoring against TOPIC_CATEGORY_MAP.
-    Returns the full offer dict or a sensible default.
-    """
     if not offers:
         return {"name": "Jasper AI", "link": "https://jasper.ai", "problem_solved": "Content creation"}
 
@@ -68,59 +60,12 @@ def match_affiliate(script_text: str, offers: dict) -> dict:
     print(f"Metadata: Matched affiliate '{offer['name']}' for category '{best_category}'.")
     return offer
 
-
-# ──────────────── IST Peak Window Scheduler ──────────────────────────────────
-
-IST = timezone(timedelta(hours=5, minutes=30))
-
-PRIMARY_PEAK_START   = 18   # 6:00 PM IST
-PRIMARY_PEAK_END     = 22   # 10:00 PM IST
-SECONDARY_PEAK_START = 12   # 12:00 PM IST
-SECONDARY_PEAK_END   = 14   # 2:00 PM IST
-QUEUE_LEAD_MINUTES   = 120  # Queue 2 hours before peak for algorithm indexing
-
-
-def get_next_upload_slot() -> datetime:
-    """
-    Returns the next optimal upload datetime in IST.
-    Videos are queued 2 hours before the peak window to allow platform indexing.
-    Target: 4:00 PM IST (2h before 6 PM peak) or 10:00 AM IST (2h before noon peak).
-    """
-    now = datetime.now(IST)
-    today_4pm   = now.replace(hour=PRIMARY_PEAK_START - 2, minute=0, second=0, microsecond=0)
-    today_10am  = now.replace(hour=SECONDARY_PEAK_START - 2, minute=0, second=0, microsecond=0)
-
-    candidates = [today_10am, today_4pm]
-    future_slots = [t for t in candidates if t > now]
-
-    if future_slots:
-        chosen = future_slots[0]
-    else:
-        # Both slots passed — schedule for tomorrow's first slot
-        chosen = today_10am + timedelta(days=1)
-
-    print(f"Scheduler: Next upload queued for {chosen.strftime('%Y-%m-%d %H:%M IST')}")
-    return chosen
-
-
-def is_in_peak_window() -> bool:
-    """Returns True if current IST time is within a peak upload window."""
-    now = datetime.now(IST)
-    h = now.hour
-    return (PRIMARY_PEAK_START <= h < PRIMARY_PEAK_END) or \
-           (SECONDARY_PEAK_START <= h < SECONDARY_PEAK_END)
-
-
 # ──────────────── Metadata Assembly ──────────────────────────────────────────
 
-def build_metadata(task: dict, affiliate_offers: dict, script_text: str = "") -> dict:
+def build_metadata(task: dict, affiliate_offers: dict, script_text: str = "", scheduling_recommendation: dict = None) -> dict:
     """
     Assemble the complete upload metadata package for a clip.
-
-    Returns:
-        dict with keys: title, description, tags, category_id,
-                        pinned_comment, cta_overlay_text, affiliate_link,
-                        scheduled_at
+    scheduling_recommendation comes from the LLM (geography, time_of_day, timezone).
     """
     offer = match_affiliate(script_text or task.get("hook_text", ""), affiliate_offers)
 
@@ -157,9 +102,6 @@ def build_metadata(task: dict, affiliate_offers: dict, script_text: str = "") ->
                  "AITools", "SaaS", "DigitalMarketing", "Productivity"]
     final_tags = list(dict.fromkeys(tags + base_tags))[:15]
 
-    # ── Scheduling ───────────────────────────────────────────────────────────
-    scheduled_at = get_next_upload_slot()
-
     metadata = {
         "title":              title,
         "description":        description,
@@ -169,12 +111,14 @@ def build_metadata(task: dict, affiliate_offers: dict, script_text: str = "") ->
         "cta_overlay_text":   cta_overlay_text,
         "affiliate_name":     offer["name"],
         "affiliate_link":     offer["link"],
-        "scheduled_at":       scheduled_at.isoformat(),
-        "youtube_description": description,   # Alias for uploader compatibility
+        "youtube_description": description,
     }
+    
+    # Store LLM recommendation for sync phase
+    if scheduling_recommendation:
+        metadata["scheduling_recommendation"] = scheduling_recommendation
 
     return metadata
-
 
 def save_metadata_json(metadata: dict, output_path: str):
     """Write the metadata bundle to a JSON file alongside the video."""

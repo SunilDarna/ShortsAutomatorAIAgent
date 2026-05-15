@@ -21,36 +21,19 @@ from googleapiclient.discovery import build
 
 # ──────────────── Channel Tiers ───────────────────────────────────────────────
 
-# 🌟 Viral Authority Tier (Priority Sources — Business/Wealth/Wisdom)
-PRIORITY_CHANNELS = [
-    "UCUyDOdBWhC1MCxEjC46d-zw",  # Alex Hormozi
-    "UCGq-a57w-aPwyi3pW7XLiHw",  # The Diary of a CEO
-    "UCxoRKax_0vHaulMbceZtAwA",  # My First Million
-    "UCGX7nGXpz-CmO_Arg-cgJ7A",  # Codie Sanchez
-    "UChfo46ZNOV-vtehDc25A1Ug",  # Ali Abdaal
-    "UC3ov_5a1a1p4-1p9fL8P0Lw",  # Patrick Bet-David (Valuetainment)
-    "UCQ4FNww3XoNgqIlkBqEAVCg",  # Iman Gadzhi
-    "UCXC3etwvNkMBGrc6tcwu5oQ",  # Noah Kagan
-    "UCa-ckhlKL98F8YXKQ-BALiw",  # Graham Stephan
-    "UCctXZhXmG-kf3tlIXgVZUlw",  # GaryVee
-]
+def load_channels():
+    import json
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "channels.json")
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            return json.load(f)
+    return {"PRIORITY_CHANNELS": [], "SECONDARY_CHANNELS": []}
 
-# ⚙️ Technical & AI Tier (Secondary Sources — Tech/Tools)
-SECONDARY_CHANNELS = [
-    "UCawZsQWqfGSbCI5yjkdVkTA",  # Matthew Berman (AI/Tech)
-    "UCTNDbjZLbTNFtBL3FAXUEQF",  # The AI Advantage
-    "UCt6l0E-bBC1Z4d7C3qgh3cA",  # ColdFusion (Narrative Tech)
-    "UCsBjURrPoezykLs9EqgamOA",  # Fireship (High retention tech)
-    "UChpleBmo18P08aKCIgti38g",  # Matt Wolfe (AI Tools)
-    "UCqcbQf6yw5KzRoDDcZ_wBSw",  # Wes Roth (AI News)
-    "UCmZhTGgWGcgQ_zRUsMowPuw",  # ByteByteGo (System Design)
-    "UCd6MoB9NC6uYN2grvUNT-Zg",  # AWS Events / re:Invent
-    "UCMxNxyU0h6S0H0t-tL8FzNg",  # Y Combinator
-    "UCNJ1Ymd5yFuUPtn21xtRbbw",  # AI Explained
-    "UCCSrPWb7mjVUIPcxSbJ2SSA",  # Sam Despo (AI Biz)
-    "UCnYMOamNKLGVlJgRUbamveA",  # Impact Theory
-    "UCbfYPyITQ-7l4upoX8nvctg",  # Two Minute Papers
-]
+def save_channels(channels_dict):
+    import json
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "channels.json")
+    with open(path, "w") as f:
+        json.dump(channels_dict, f, indent=4)
 
 # ──────────────── Hook Type Definitions (for DB weighting) ───────────────────
 
@@ -80,42 +63,73 @@ def get_local_headers() -> dict:
     }
 
 
-def get_latest_video_from_channels(unused_key=None):
+def get_recent_videos_from_channel(channel_id: str, count: int = 5):
     """
-    Uses local yt-dlp scraper to find the latest video from priority then secondary channels.
-    Returns (video_url, title) or raises Exception.
-    PRESERVED: No changes to this scraping method.
+    Uses local yt-dlp scraper to find the recent N videos from a specific channel.
+    Returns a list of tuples: [(video_url, title), ...].
     """
-    priority_pool = list(PRIORITY_CHANNELS)
-    random.shuffle(priority_pool)
-    full_pool = priority_pool + SECONDARY_CHANNELS
+    try:
+        channel_url = f"https://www.youtube.com/channel/{channel_id}/videos"
+        cmd = [
+            "python3", "-m", "yt_dlp",
+            "--playlist-items", f"1-{count}",
+            "--get-id", "--get-title",
+            "--flat-playlist",
+            "--quiet", "--no-warnings",
+            "--user-agent", get_local_headers()["User-Agent"],
+            channel_url,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        videos = []
+        if result.returncode == 0 and result.stdout.strip():
+            lines = result.stdout.strip().split("\n")
+            # yt-dlp --get-id --get-title prints title then ID on alternating lines
+            for i in range(0, len(lines)-1, 2):
+                title = lines[i]
+                video_id = lines[i+1]
+                videos.append((f"https://www.youtube.com/watch?v={video_id}", title))
+            return videos
+    except Exception as e:
+        print(f"Local Scraper Error for {channel_id}: {e}")
 
-    for attempt, channel_id in enumerate(full_pool):
-        tier = "PRIORITY" if attempt < len(PRIORITY_CHANNELS) else "SECONDARY"
-        print(f"Local Scraper [{tier}]: Probing channel {channel_id}...")
+    raise Exception(f"Local Scraper failed to find videos for channel {channel_id}.")
 
-        try:
-            channel_url = f"https://www.youtube.com/channel/{channel_id}/videos"
-            cmd = [
-                "python3", "-m", "yt_dlp",
-                "--playlist-items", "1",
-                "--get-id", "--get-title",
-                "--flat-playlist",
-                "--quiet", "--no-warnings",
-                "--user-agent", get_local_headers()["User-Agent"],
-                channel_url,
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            if result.returncode == 0 and result.stdout.strip():
-                lines = result.stdout.strip().split("\n")
-                if len(lines) >= 2:
-                    title    = lines[0]
-                    video_id = lines[1]
-                    return f"https://www.youtube.com/watch?v={video_id}", title
-        except Exception as e:
-            print(f"Local Scraper Error for {channel_id}: {e}")
-
-    raise Exception("Local Scraper failed to find videos in both tiers.")
+def discover_new_channels(llm_api_key: str):
+    """
+    Prompt the LLM to discover 5 new YouTube channels in the niche.
+    Appends them to channels.json.
+    """
+    client = genai.Client(api_key=llm_api_key)
+    print("AI Brain: Channels exhausted. Discovering new channels autonomously...")
+    
+    prompt = """You are a YouTube Shorts Sourcing Strategist.
+We need 5 highly viral, long-form podcast/interview YouTube channel IDs focusing on wealth creation, AI leverage, disruptive business strategies, and high-performance mindset (similar to Alex Hormozi or Diary of a CEO).
+Do not return channels that only post shorts.
+IMPORTANT: Return ONLY a valid JSON array of strings containing the exact YouTube Channel IDs. (e.g. ["UC...", "UC..."])
+"""
+    try:
+        response = client.models.generate_content(
+            model="gemini-flash-latest",
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.7)
+        )
+        import json
+        raw = re.sub(r"```json|```", "", response.text.strip()).strip()
+        new_channels = json.loads(raw)
+        
+        if isinstance(new_channels, list) and len(new_channels) > 0:
+            channels_dict = load_channels()
+            added_count = 0
+            for cid in new_channels:
+                if cid not in channels_dict["PRIORITY_CHANNELS"] and cid not in channels_dict["SECONDARY_CHANNELS"]:
+                    channels_dict["PRIORITY_CHANNELS"].append(cid)
+                    added_count += 1
+            save_channels(channels_dict)
+            print(f"AI Brain: Successfully discovered and added {added_count} new channels to channels.json!")
+            return True
+    except Exception as e:
+        print(f"AI Brain: Failed to discover new channels. Error: {e}")
+    return False
 
 
 # ──────────────── Transcript Fetcher — PRESERVED & EXTENDED ──────────────────
@@ -210,7 +224,7 @@ OUTPUT: Return ONLY a valid JSON array with no markdown. Example:
 ]"""
 
 
-def _run_pass1(client, transcript: str, preferred_hook_type: str = None) -> list:
+def _run_pass1(client, transcript: str, preferred_hook_type: str = None, used_segments: list = None) -> list:
     """
     Pass 1: Semantic Heatmapping.
     Identifies 3-5 high-value, contextually independent segments from the transcript.
@@ -219,7 +233,15 @@ def _run_pass1(client, transcript: str, preferred_hook_type: str = None) -> list
     if preferred_hook_type:
         hook_bias = f"\nBIAS: Prioritize segments that fit the '{preferred_hook_type}' hook type, as historical data shows this performs best."
 
-    prompt = f"""{PASS1_SYSTEM_PROMPT}{hook_bias}
+    avoid_bias = ""
+    if used_segments:
+        avoid_bias = "\nIMPORTANT AVOIDANCE: Do NOT extract segments that overlap with any of the following previously used timestamps:\n"
+        for seg in used_segments:
+            s_str = seconds_to_mmss(seg["Start_Time"])
+            e_str = seconds_to_mmss(seg["End_Time"])
+            avoid_bias += f"- {s_str} to {e_str}\n"
+
+    prompt = f"""{PASS1_SYSTEM_PROMPT}{hook_bias}{avoid_bias}
 
 Analyze this transcript and identify the 3-5 most viral-worthy segments.
 Return ONLY valid JSON.
@@ -228,7 +250,7 @@ TRANSCRIPT:
 {transcript[:18000]}
 """
     response = client.models.generate_content(
-        model="gemini-2.0-flash",
+        model="gemini-flash-latest",
         contents=prompt,
         config=types.GenerateContentConfig(temperature=0.7)
     )
@@ -329,7 +351,7 @@ def _run_pass2(client, concept: dict, affiliate_offers: dict, transcript: str) -
     )
 
     response = client.models.generate_content(
-        model="gemini-2.0-flash",
+        model="gemini-flash-latest",
         contents=prompt,
         config=types.GenerateContentConfig(temperature=0.4)  # Lower temp for precision JSON
     )
@@ -396,7 +418,7 @@ def _validate_hook(client, task: dict) -> bool:
             hook_type=task.get("hook_type", ""),
         )
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-flash-latest",
             contents=prompt,
             config=types.GenerateContentConfig(temperature=0.1)
         )
@@ -418,7 +440,7 @@ def _validate_hook(client, task: dict) -> bool:
 
 def extract_task_with_llm(video_url: str, transcript: str,
                           llm_api_key: str, affiliate_offers: dict,
-                          preferred_hook_type: str = None) -> dict:
+                          preferred_hook_type: str = None, used_segments: list = None) -> dict:
     """
     TWO-PASS VIRAL HOOK ENGINE with Validation Agent.
 
@@ -431,7 +453,7 @@ def extract_task_with_llm(video_url: str, transcript: str,
     client = genai.Client(api_key=llm_api_key)
 
     # ── Pass 1 ────────────────────────────────────────────────────────────────
-    concepts = _run_pass1(client, transcript, preferred_hook_type)
+    concepts = _run_pass1(client, transcript, preferred_hook_type, used_segments)
     if not concepts:
         raise Exception("Pass 1 returned no concepts.")
 
@@ -494,3 +516,48 @@ def generate_autonomous_task(llm_api_key: str, youtube_api_key: str,
     print(f"  Hook: {task.get('hook_text', '')}")
 
     return video_url, task, transcript_raw
+
+
+# ──────────────── AI Scheduling Agent ─────────────────────────────────────────
+
+def get_scheduling_recommendation(llm_api_key: str, title: str, script_text: str) -> dict:
+    """
+    Prompt the LLM to recommend the optimal target geography and time of day for high views
+    based on the video's content.
+    """
+    client = genai.Client(api_key=llm_api_key)
+    
+    prompt = f"""You are a YouTube Shorts Scheduling Strategist.
+Based on the title and content of this video, recommend the best Geography (default to India if not region-specific) and the optimal Time of Day for high viewership (in that geography's local time, 24-hour format HH:MM).
+
+Title: {title}
+Content snippet: {script_text[:500]}
+
+Return ONLY valid JSON in this format:
+{{
+    "geography": "India",
+    "time_of_day": "18:00",
+    "utc_offset": "+0530",
+    "reasoning": "Brief explanation of why this time is best for this audience."
+}}
+"""
+    try:
+        response = client.models.generate_content(
+            model="gemini-flash-latest",
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.2)
+        )
+        raw = re.sub(r"```json|```", "", response.text.strip()).strip()
+        result = json.loads(raw)
+        print(f"AI Brain Scheduler: Recommended {result.get('time_of_day')} (UTC {result.get('utc_offset')}) for {result.get('geography')}")
+        return result
+    except Exception as e:
+        print(f"AI Brain: Failed to get scheduling recommendation. {e}")
+        # Default to India at 18:00 IST
+        return {
+            "geography": "India",
+            "time_of_day": "18:00",
+            "utc_offset": "+0530",
+            "reasoning": "Fallback default."
+        }
+

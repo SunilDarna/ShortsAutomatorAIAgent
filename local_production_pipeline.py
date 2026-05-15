@@ -71,71 +71,103 @@ def produce():
     preferred_hook = database.get_best_hook_type()
     print(f"Pipeline: Using preferred hook type → '{preferred_hook}'")
 
-    # ── Source: Find a fresh video via yt-dlp scraper ────────────────────────
-    video_url   = None
+    # ── Source: Iterate through all channels to find a fresh non-overlapping clip ──
+    channels_dict = ai_brain.load_channels()
+    priority_pool = list(channels_dict.get("PRIORITY_CHANNELS", []))
+    secondary_pool = list(channels_dict.get("SECONDARY_CHANNELS", []))
+    
+    import random
+    random.shuffle(priority_pool)
+    full_pool = priority_pool + secondary_pool
+
+    if not full_pool:
+        print("Pipeline: No channels available in channels.json.")
+        return False
+
+    task = None
+    video_url = None
     video_title = None
 
-    for _ in range(30):
+    for channel_id in full_pool:
         try:
-            temp_url, temp_title = ai_brain.get_latest_video_from_channels()
-            video_url   = temp_url
-            video_title = temp_title
-            break
+            recent_videos = ai_brain.get_recent_videos_from_channel(channel_id, count=5)
         except Exception as e:
-            print(f"Sourcing attempt failed: {e}")
+            print(f"Pipeline: Sourcing failed for {channel_id}: {e}")
             continue
 
-    if not video_url:
-        print("Pipeline: No videos found from any channel.")
-        return False
+        for temp_url, temp_title in recent_videos:
+            v_id = temp_url.split("v=")[-1]
+            print(f"\nPipeline: Targeting '{temp_title}' (ID: {v_id}) from channel {channel_id}")
 
-    v_id = video_url.split("v=")[-1]
-    print(f"\nPipeline: Targeting '{video_title}' (ID: {v_id})")
-
-    # Register source in DB
-    database.upsert_source_media(video_url, video_title)
-
-    # ── Transcript ────────────────────────────────────────────────────────────
-    try:
-        transcript_text, transcript_raw = ai_brain.get_transcript(
-            video_url, secrets["youtube_api_key"]
-        )
-    except Exception as e:
-        print(f"Transcript failed: {e}")
-        return False
-
-    # ── Two-Pass LLM + DB Overlap Guard (up to 5 attempts) ───────────────────
-    task = None
-    for attempt in range(5):
-        print(f"\nPipeline: LLM extraction attempt {attempt + 1}/5...")
-        try:
-            potential_task = ai_brain.extract_task_with_llm(
-                video_url, transcript_text,
-                secrets["llm_api_key"], affiliate_offers,
-                preferred_hook_type=preferred_hook
-            )
-
-            s = ai_brain.parse_seconds(potential_task["start_time"])
-            e = ai_brain.parse_seconds(potential_task["end_time"])
-
-            # ── Agentic Rule: DB overlap check ────────────────────────────────
-            if database.is_segment_overlapping(video_url, s, e):
-                print(f"  DB: Segment {potential_task['start_time']}–{potential_task['end_time']} "
-                      f"overlaps existing clip. Retrying...")
+            # ── Transcript ────────────────────────────────────────────────────────────
+            try:
+                transcript_text, temp_transcript_raw = ai_brain.get_transcript(
+                    temp_url, secrets.get("youtube_api_key", "")
+                )
+            except Exception as e:
+                print(f"Pipeline: Transcript failed for {v_id}: {e}")
                 continue
 
-            task = potential_task
-            task["transcript_raw"] = transcript_raw
-            print(f"  ✅ Non-overlapping segment confirmed by DB.")
-            break
+            used_segments = database.get_all_used_segments(temp_url)
+            if used_segments:
+                print(f"Pipeline: Found {len(used_segments)} previously used segments for this video. Instructing AI to avoid them.")
 
-        except Exception as e:
-            print(f"  LLM attempt {attempt + 1} failed: {e}")
-            continue
+            # ── Two-Pass LLM + DB Overlap Guard (up to 5 attempts per video) ────────
+            found_task = False
+            for attempt in range(5):
+                print(f"\nPipeline: LLM extraction attempt {attempt + 1}/5...")
+                try:
+                    potential_task = ai_brain.extract_task_with_llm(
+                        temp_url, transcript_text,
+                        secrets.get("llm_api_key", ""), affiliate_offers,
+                        preferred_hook_type=preferred_hook,
+                        used_segments=used_segments
+                    )
+
+                    s = ai_brain.parse_seconds(potential_task["start_time"])
+                    e = ai_brain.parse_seconds(potential_task["end_time"])
+
+                    # ── Agentic Rule: DB overlap check ────────────────────────────────
+                    if database.is_segment_overlapping(temp_url, s, e):
+                        print(f"  DB: Segment {potential_task['start_time']}–{potential_task['end_time']} "
+                              f"overlaps existing clip. Retrying...")
+                        continue
+
+                    task = potential_task
+                    transcript_raw = temp_transcript_raw
+                    task["transcript_raw"] = transcript_raw
+                    video_url = temp_url
+                    video_title = temp_title
+                    found_task = True
+                    print(f"  ✅ Non-overlapping segment confirmed by DB.")
+                    break
+
+                except Exception as e:
+                    print(f"  LLM attempt {attempt + 1} failed: {e}")
+                    continue
+
+            if found_task:
+                break
+            else:
+                print(f"Pipeline: Exhausted video {v_id}. Moving to next video in channel...")
+
+        if found_task:
+            break
+        else:
+            print(f"Pipeline: Exhausted all recent videos for channel {channel_id}. Moving to next channel...")
 
     if not task:
-        print("Pipeline: Could not find a valid non-overlapping segment after 5 attempts.")
-        return False
+        print("\nPipeline: All current channels exhausted! Initiating self-healing discovery...")
+        success = ai_brain.discover_new_channels(secrets.get("llm_api_key", ""))
+        if success:
+            print("Pipeline: Self-healing complete. Restarting produce() with new channels...")
+            return produce()
+        else:
+            print("Pipeline: Self-healing failed. Cannot proceed.")
+            return False
+
+    # Register source in DB now that we have a valid task
+    database.upsert_source_media(video_url, video_title)
 
     # ── Generate clip ID + file paths ─────────────────────────────────────────
     clip_id        = _generate_clip_id()
@@ -148,8 +180,13 @@ def produce():
     meta_path   = os.path.join(PENDING_DIR, meta_filename)
 
     # ── Phase 4: Build complete metadata ─────────────────────────────────────
+    llm_recommendation = ai_brain.get_scheduling_recommendation(
+        secrets["llm_api_key"], video_title, task.get("hook_text", "")
+    )
+    
     full_metadata = metadata_builder.build_metadata(
-        task, affiliate_offers, script_text=task.get("hook_text", "")
+        task, affiliate_offers, script_text=task.get("hook_text", ""),
+        scheduling_recommendation=llm_recommendation
     )
     # Merge LLM task fields into metadata
     full_metadata.update({
@@ -262,12 +299,65 @@ def sync():
     print(f"Uploading: {meta.get('title', 'Unknown')}")
     print(f"Hook Type: {meta.get('hook_type', 'N/A')}")
 
-    # ── Check peak window ────────────────────────────────────────────────────
-    if not metadata_builder.is_in_peak_window():
-        scheduled = meta.get("scheduled_at", "")
-        print(f"Pipeline: Not in peak window. Scheduled for: {scheduled}")
-        print("Pipeline: Use --force to override scheduling.")
-        # Continue anyway in non-interactive mode
+    # ── Calculate Next Valid Schedule ────────────────────────────────────────
+    scheduling_rec = meta.get("scheduling_recommendation")
+    publish_at_iso = None
+    
+    if scheduling_rec:
+        print(f"Pipeline: AI recommended time: {scheduling_rec.get('time_of_day')} (UTC {scheduling_rec.get('utc_offset')})")
+        try:
+            # Get current queue
+            queue = youtube_uploader.get_schedule_queue(
+                secrets["youtube_client_id"], secrets["youtube_client_secret"], secrets["youtube_refresh_token"]
+            )
+            print(f"Pipeline: Current schedule queue has {len(queue)} videos.")
+            
+            # Find next valid slot
+            from datetime import datetime, timedelta, timezone
+            
+            # Parse recommended time (e.g., "18:00")
+            time_parts = scheduling_rec.get("time_of_day", "18:00").split(":")
+            rec_hour = int(time_parts[0])
+            rec_minute = int(time_parts[1]) if len(time_parts) > 1 else 0
+            
+            # Parse UTC offset (e.g., "+0530" or "+05:30")
+            offset_str = scheduling_rec.get("utc_offset", "+0000").replace(":", "")
+            sign = -1 if offset_str.startswith("-") else 1
+            offset_hours = int(offset_str[1:3])
+            offset_mins = int(offset_str[3:5])
+            tz = timezone(timedelta(hours=sign * offset_hours, minutes=sign * offset_mins))
+            
+            # Find the latest scheduled time in UTC
+            now_utc = datetime.now(timezone.utc)
+            latest_scheduled_utc = now_utc
+            if queue:
+                # queue contains strings like '2026-05-15T18:00:00Z'
+                queue_latest = datetime.strptime(queue[-1].replace("Z", "+0000"), "%Y-%m-%dT%H:%M:%S%z")
+                # Ensure we only consider future queue items
+                if queue_latest > latest_scheduled_utc:
+                    latest_scheduled_utc = queue_latest
+            
+            # We want at least a 6 hour gap from the latest scheduled video
+            MIN_GAP_HOURS = 6
+            
+            candidate_date = latest_scheduled_utc.astimezone(tz)
+            candidate_slot = candidate_date.replace(hour=rec_hour, minute=rec_minute, second=0, microsecond=0)
+            
+            # Minimum allowed time is whichever is later: 6 hours from the queue, OR right now
+            min_allowed_utc = latest_scheduled_utc + timedelta(hours=MIN_GAP_HOURS)
+            if min_allowed_utc < now_utc:
+                min_allowed_utc = now_utc
+                
+            # If the candidate slot is in the past or within the minimum gap, push to next day
+            while candidate_slot.astimezone(timezone.utc) < min_allowed_utc:
+                candidate_slot += timedelta(days=1)
+                
+            publish_at_iso = candidate_slot.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            print(f"Pipeline: Final computed schedule: {publish_at_iso} UTC")
+            
+        except Exception as e:
+            print(f"Pipeline: Failed to calculate schedule from recommendation. Error: {e}")
+            publish_at_iso = None
 
     try:
         youtube_id = youtube_uploader.upload_to_youtube(
@@ -280,6 +370,7 @@ def sync():
             tags           = meta.get("tags"),
             category_id    = meta.get("category_id", "28"),
             srt_path       = srt_path if os.path.exists(srt_path) else None,
+            publish_at     = publish_at_iso,
         )
 
         # ── Update DB ─────────────────────────────────────────────────────────

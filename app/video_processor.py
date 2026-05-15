@@ -13,6 +13,7 @@ import subprocess
 import yt_dlp
 import os
 import sys
+import re
 
 # Import Phase 2 vision tracker (gracefully degrades if MediaPipe not installed)
 try:
@@ -34,13 +35,30 @@ def wrap_text(text: str, max_width: int = 25) -> str:
     lines = []
     current_line = []
     for word in words:
-        if len(" ".join(current_line + [word])) <= max_width:
+        if not current_line:
+            current_line.append(word)
+        elif len(" ".join(current_line + [word])) <= max_width:
             current_line.append(word)
         else:
             lines.append(" ".join(current_line))
             current_line = [word]
-    lines.append(" ".join(current_line))
-    return "\\n".join(lines)
+    if current_line:
+        lines.append(" ".join(current_line))
+    return "\n".join(lines)
+
+def clean_text(text: str) -> str:
+    """Removes [Music], [Applause], and validates text for captions."""
+    # Remove bracketed text like [Music]
+    text = re.sub(r'\[.*?\]', '', text)
+    # Remove non-alphanumeric/punctuation garbage
+    text = re.sub(r'[^\w\s.,!?\'-]', '', text)
+    text = text.strip()
+    
+    # If the remaining text has no letters, reject it
+    if not re.search(r'[a-zA-Z]', text):
+        return ""
+        
+    return text
 
 
 def parse_time(time_str: str) -> float:
@@ -171,18 +189,17 @@ def process_for_shorts(input_path: str, output_path: str,
 
     if has_drawtext:
         def escape(t: str) -> str:
-            """Escape text for FFmpeg drawtext."""
-            return t.replace("'", "\u2019").replace(":", "\\:").replace("\\n", "\\\\n")
+            return t.replace("'", "\u2019").replace(":", "\\:")
 
-        safe_hook   = wrap_text(escape(hook_text),   20)
-        safe_bridge = wrap_text(escape(bridge_text), 30)
-        safe_cta    = wrap_text(escape(cta_overlay_text), 30)
+        safe_hook   = escape(wrap_text(hook_text,   20))
+        safe_bridge = escape(wrap_text(bridge_text, 25))
+        safe_cta    = escape(wrap_text(cta_overlay_text, 22))
 
         # ── 1. THUMBNAIL INJECTION (0–0.1s) ──────────────────────────────────
-        thumb_text = wrap_text(escape(hook_text.upper()), 12)
+        thumb_text = escape(wrap_text(hook_text.upper(), 15))
         thumb_filter = (
             f"drawtext=text='{thumb_text}':fontfile='{font_path}':"
-            f"fontcolor=white:fontsize=100:line_spacing=20:"
+            f"fontcolor=white:fontsize=75:line_spacing=20:"
             f"box=1:boxcolor=red@0.9:boxborderw=30:"
             f"x=(w-text_w)/2:y=(h-text_h)/2:"
             f"enable='between(t,0,0.1)'"
@@ -191,7 +208,7 @@ def process_for_shorts(input_path: str, output_path: str,
         # ── 2. HOOK OVERLAY (0–3s, yellow, top zone) ─────────────────────────
         hook_filter = (
             f"drawtext=text='{safe_hook}':fontfile='{font_path}':"
-            f"fontcolor=yellow:fontsize=64:"
+            f"fontcolor=yellow:fontsize=56:"
             f"box=1:boxcolor=black@0.7:boxborderw=15:"
             f"x=(w-text_w)/2:y=200:"
             f"enable='between(t,0,3)'"
@@ -208,7 +225,7 @@ def process_for_shorts(input_path: str, output_path: str,
         # ── 4. BRIDGE CTA (last 4s) ───────────────────────────────────────────
         bridge_filter = (
             f"drawtext=text='{safe_bridge}':fontfile='{font_path}':"
-            f"fontcolor=white:fontsize=48:"
+            f"fontcolor=white:fontsize=42:"
             f"box=1:boxcolor=black@0.5:boxborderw=10:"
             f"x=(w-text_w)/2:y=h-th-150:"
             f"enable='between(t,{duration - 4},{duration})'"
@@ -217,7 +234,7 @@ def process_for_shorts(input_path: str, output_path: str,
         # ── 5. AFFILIATE CTA OVERLAY (last 3s) — Phase 4 ─────────────────────
         cta_filter = (
             f"drawtext=text='{safe_cta}':fontfile='{font_path}':"
-            f"fontcolor=yellow:fontsize=52:"
+            f"fontcolor=yellow:fontsize=46:"
             f"box=1:boxcolor=black@0.85:boxborderw=12:"
             f"x=(w-text_w)/2:y=h-th-400:"
             f"enable='between(t,{duration - 3},{duration})'"
@@ -254,13 +271,17 @@ def process_for_shorts(input_path: str, output_path: str,
 
                     last_cap_end = rel_end
 
-                    txt = wrap_text(
-                        e_text.replace("'", "").replace(":", "").strip().upper(), 25
-                    )
-                    if txt and len(txt) < 100:
+                    cleaned_text = clean_text(e_text)
+                    if not cleaned_text:
+                        continue
+
+                    txt = escape(wrap_text(
+                        cleaned_text.replace("'", "").replace(":", "").upper(), 22
+                    ))
+                    if txt and len(txt) < 120:
                         cap_f = (
                             f"drawtext=text='{txt}':fontfile='{font_path}':"
-                            f"fontcolor=white:fontsize=56:"
+                            f"fontcolor=white:fontsize=42:"
                             f"box=1:boxcolor=black@0.6:"
                             f"x=(w-text_w)/2:y=h-th-750:"
                             f"enable='between(t,{rel_start},{rel_end})'"
