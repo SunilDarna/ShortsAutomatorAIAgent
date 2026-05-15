@@ -528,7 +528,7 @@ def get_scheduling_recommendation(llm_api_key: str, title: str, script_text: str
     client = genai.Client(api_key=llm_api_key)
     
     prompt = f"""You are a YouTube Shorts Scheduling Strategist.
-Based on the title and content of this video, recommend the best Geography (default to India if not region-specific) and the optimal Time of Day for high viewership (in that geography's local time, 24-hour format HH:MM).
+Based on the title and content of this video, recommend the best Geography (default to India if not region-specific) and THREE optimal Time of Day slots for high viewership (Morning, Afternoon, Evening) in that geography's local time (24-hour format HH:MM).
 
 Title: {title}
 Content snippet: {script_text[:500]}
@@ -536,9 +536,9 @@ Content snippet: {script_text[:500]}
 Return ONLY valid JSON in this format:
 {{
     "geography": "India",
-    "time_of_day": "18:00",
+    "recommended_slots": ["09:00", "15:00", "21:00"],
     "utc_offset": "+0530",
-    "reasoning": "Brief explanation of why this time is best for this audience."
+    "reasoning": "Brief explanation of why these three windows are best for this specific audience niche."
 }}
 """
     try:
@@ -549,15 +549,16 @@ Return ONLY valid JSON in this format:
         )
         raw = re.sub(r"```json|```", "", response.text.strip()).strip()
         result = json.loads(raw)
-        print(f"AI Brain Scheduler: Recommended {result.get('time_of_day')} (UTC {result.get('utc_offset')}) for {result.get('geography')}")
+        slots = result.get('recommended_slots', [])
+        print(f"AI Brain Scheduler: Recommended slots {slots} (UTC {result.get('utc_offset')}) for {result.get('geography')}")
         return result
     except Exception as e:
         print(f"AI Brain: Failed to get scheduling recommendation. {e}")
-        # Default to India at 18:00 IST
+        # Default to India with 3 slots
         return {
             "geography": "India",
-            "time_of_day": "18:00",
+            "recommended_slots": ["09:00", "15:00", "20:00"],
             "utc_offset": "+0530",
-            "reasoning": "Fallback default."
+            "reasoning": "Fallback defaults."
         }
 

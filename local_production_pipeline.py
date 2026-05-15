@@ -304,7 +304,7 @@ def sync():
     publish_at_iso = None
     
     if scheduling_rec:
-        print(f"Pipeline: AI recommended time: {scheduling_rec.get('time_of_day')} (UTC {scheduling_rec.get('utc_offset')})")
+        print(f"Pipeline: AI recommended geography: {scheduling_rec.get('geography')} (UTC {scheduling_rec.get('utc_offset')})")
         try:
             # Get current queue
             queue = youtube_uploader.get_schedule_queue(
@@ -315,45 +315,50 @@ def sync():
             # Find next valid slot
             from datetime import datetime, timedelta, timezone
             
-            # Parse recommended time (e.g., "18:00")
-            time_parts = scheduling_rec.get("time_of_day", "18:00").split(":")
-            rec_hour = int(time_parts[0])
-            rec_minute = int(time_parts[1]) if len(time_parts) > 1 else 0
-            
-            # Parse UTC offset (e.g., "+0530" or "+05:30")
+            # 1. Parse slots and timezone
+            slots = scheduling_rec.get("recommended_slots", ["09:00", "15:00", "21:00"])
             offset_str = scheduling_rec.get("utc_offset", "+0000").replace(":", "")
             sign = -1 if offset_str.startswith("-") else 1
             offset_hours = int(offset_str[1:3])
             offset_mins = int(offset_str[3:5])
             tz = timezone(timedelta(hours=sign * offset_hours, minutes=sign * offset_mins))
-            
-            # Find the latest scheduled time in UTC
+
+            # 2. Get latest scheduled time (UTC)
             now_utc = datetime.now(timezone.utc)
             latest_scheduled_utc = now_utc
             if queue:
-                # queue contains strings like '2026-05-15T18:00:00Z'
                 queue_latest = datetime.strptime(queue[-1].replace("Z", "+0000"), "%Y-%m-%dT%H:%M:%S%z")
-                # Ensure we only consider future queue items
                 if queue_latest > latest_scheduled_utc:
                     latest_scheduled_utc = queue_latest
-            
-            # We want at least a 6 hour gap from the latest scheduled video
-            MIN_GAP_HOURS = 6
-            
-            candidate_date = latest_scheduled_utc.astimezone(tz)
-            candidate_slot = candidate_date.replace(hour=rec_hour, minute=rec_minute, second=0, microsecond=0)
-            
-            # Minimum allowed time is whichever is later: 6 hours from the queue, OR right now
+
+            # 3. Define 5 hour gap
+            MIN_GAP_HOURS = 5
             min_allowed_utc = latest_scheduled_utc + timedelta(hours=MIN_GAP_HOURS)
-            if min_allowed_utc < now_utc:
-                min_allowed_utc = now_utc
-                
-            # If the candidate slot is in the past or within the minimum gap, push to next day
-            while candidate_slot.astimezone(timezone.utc) < min_allowed_utc:
-                candidate_slot += timedelta(days=1)
-                
-            publish_at_iso = candidate_slot.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            print(f"Pipeline: Final computed schedule: {publish_at_iso} UTC")
+
+            # 4. Find the next available slot
+            current_date_in_tz = latest_scheduled_utc.astimezone(tz)
+            found_slot = None
+            
+            # Search over the next 30 days
+            for day_offset in range(30):
+                check_day = current_date_in_tz + timedelta(days=day_offset)
+                for slot_str in sorted(slots): # Sort slots to ensure chronological order (Morning -> Evening)
+                    try:
+                        h, m = map(int, slot_str.split(":"))
+                        candidate_slot = check_day.replace(hour=h, minute=m, second=0, microsecond=0)
+                        candidate_utc = candidate_slot.astimezone(timezone.utc)
+                        
+                        if candidate_utc >= min_allowed_utc:
+                            found_slot = candidate_utc
+                            break
+                    except:
+                        continue
+                if found_slot:
+                    break
+
+            if found_slot:
+                publish_at_iso = found_slot.strftime("%Y-%m-%dT%H:%M:%SZ")
+                print(f"Pipeline: Final computed schedule: {publish_at_iso} UTC")
             
         except Exception as e:
             print(f"Pipeline: Failed to calculate schedule from recommendation. Error: {e}")
