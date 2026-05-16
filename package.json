@@ -1,4 +1,6 @@
 {
+  "name": "shorts-automator-ai-agent",
+  "version": "3.0.0",
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0"
   }

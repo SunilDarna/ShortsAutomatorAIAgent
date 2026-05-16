@@ -1,6 +1,6 @@
 """
 video_processor.py — Phase 2: Subject-Aware Video Processing
-v2.0 — Integrates vision_tracker for dynamic pillarboxing + 3-second CTA overlay.
+v3.0 — Integrates vision_tracker for dynamic pillarboxing + Visual Retention CTA system.
 
 Key changes from v1:
 - Pillarboxing via vision_tracker (MediaPipe → FFmpeg; no intermediate files)
@@ -25,6 +25,17 @@ except ImportError:
         VISION_AVAILABLE = True
     except ImportError:
         VISION_AVAILABLE = False
+
+try:
+    from app import caption_intelligence
+    from app import ass_captions
+except ImportError:
+    try:
+        import caption_intelligence
+        import ass_captions
+    except ImportError:
+        caption_intelligence = None
+        ass_captions = None
 
 
 # ──────────────── Utility Functions — PRESERVED ───────────────────────────────
@@ -115,6 +126,25 @@ def _detect_hw_encoder(ffmpeg_bin: str) -> str:
     return "libx264"
 
 
+def _replace_encoder(cmd: list, old_encoder: str, new_encoder: str) -> list:
+    new_cmd = list(cmd)
+    for idx, value in enumerate(new_cmd):
+        if value == old_encoder:
+            new_cmd[idx] = new_encoder
+    # Remove VideoToolbox-only quality args when falling back to libx264.
+    cleaned = []
+    skip_next = False
+    for value in new_cmd:
+        if skip_next:
+            skip_next = False
+            continue
+        if value == "-q:v":
+            skip_next = True
+            continue
+        cleaned.append(value)
+    return cleaned
+
+
 # ──────────────── Downloader — PRESERVED ─────────────────────────────────────
 
 def download_video_section(url: str, start_time, end_time, output_path: str, unused_key=None):
@@ -150,7 +180,8 @@ def process_for_shorts(input_path: str, output_path: str,
                        bridge_text: str, hook_text: str = "",
                        transcript_raw: list = None,
                        cta_overlay_text: str = "Want this tool? Link in bio 👆",
-                       affiliate_link: str = ""):
+                       affiliate_link: str = "",
+                       visual_plan: dict = None):
     """
     Full Shorts rendering pipeline:
     1. Subject-aware pillarboxing via MediaPipe (Phase 2)
@@ -167,6 +198,19 @@ def process_for_shorts(input_path: str, output_path: str,
     seg_start = parse_time(start_time)
     seg_end   = parse_time(end_time)
     duration  = seg_end - seg_start
+    visual_plan = visual_plan or {}
+    caption_detection = {"burned_in_captions": False, "caption_zone": "none"}
+    caption_strategy = {"render_generated_captions": True, "caption_zone": "lower"}
+    if caption_intelligence:
+        caption_detection = caption_intelligence.detect_burned_in_captions(
+            input_path, seg_start, duration
+        )
+        caption_strategy = caption_intelligence.choose_caption_strategy(caption_detection)
+        if caption_detection.get("burned_in_captions"):
+            print(
+                "Video Processor: Source captions detected; generated captions "
+                f"will be suppressed ({caption_detection.get('caption_zone')})."
+            )
 
     ffmpeg_bin  = _get_ffmpeg_bin()
     has_drawtext = _has_filter(ffmpeg_bin, "drawtext")
@@ -193,10 +237,11 @@ def process_for_shorts(input_path: str, output_path: str,
 
         safe_hook   = escape(wrap_text(hook_text,   20))
         safe_bridge = escape(wrap_text(bridge_text, 25))
-        safe_cta    = escape(wrap_text(cta_overlay_text, 22))
+        dynamic_cta_text = visual_plan.get("cta_text") or cta_overlay_text
+        safe_cta    = escape(wrap_text(dynamic_cta_text, 22))
 
         # ── 1. THUMBNAIL INJECTION (0–0.1s) ──────────────────────────────────
-        thumb_text = escape(wrap_text(hook_text.upper(), 15))
+        thumb_text = escape(wrap_text((visual_plan.get("thumbnail_text") or hook_text).upper(), 15))
         thumb_filter = (
             f"drawtext=text='{thumb_text}':fontfile='{font_path}':"
             f"fontcolor=white:fontsize=75:line_spacing=20:"
@@ -214,12 +259,18 @@ def process_for_shorts(input_path: str, output_path: str,
             f"enable='between(t,0,3)'"
         )
 
-        # ── 3. SUBSCRIBE BUG (permanent, elevated safe zone) ─────────────────
-        sub_filter = (
-            f"drawtext=text='SUBSCRIBE':fontfile='{font_path}':"
-            f"fontcolor=white:fontsize=42:"
-            f"box=1:boxcolor=red@0.9:boxborderw=10:"
-            f"x=(w-text_w)/2:y=h-th-600"
+        # ── 3. DYNAMIC CTA (late, contextual, non-permanent) ─────────────────
+        dyn_cta_start = float(visual_plan.get("cta_start", max(6.0, duration * 0.76)))
+        dyn_cta_end = float(visual_plan.get("cta_end", min(duration, dyn_cta_start + 2.4)))
+        cta_box = visual_plan.get("caption_style_pack", {}).get("cta_box", "black@0.82")
+        cta_color = visual_plan.get("caption_style_pack", {}).get("cta_color", "yellow")
+        follow_filter = (
+            f"drawtext=text='{safe_cta}':fontfile='{font_path}':"
+            f"fontcolor={cta_color}:fontsize=48:"
+            f"box=1:boxcolor={cta_box}:boxborderw=14:"
+            f"x=(w-text_w)/2:"
+            f"y=h-th-520+(20*sin(20*(t-{dyn_cta_start}))):"
+            f"enable='between(t,{dyn_cta_start},{dyn_cta_end})'"
         )
 
         # ── 4. BRIDGE CTA (last 4s) ───────────────────────────────────────────
@@ -237,14 +288,24 @@ def process_for_shorts(input_path: str, output_path: str,
             f"fontcolor=yellow:fontsize=46:"
             f"box=1:boxcolor=black@0.85:boxborderw=12:"
             f"x=(w-text_w)/2:y=h-th-400:"
-            f"enable='between(t,{duration - 3},{duration})'"
+            f"enable='between(t,{duration - 2.2},{duration})'"
         )
 
         # ── 6. SMART CAPTIONS from transcript (above subscribe zone) ──────────
         caption_filters = []
         last_cap_end = 0.0
 
-        if transcript_raw:
+        ass_path = None
+        if (
+            transcript_raw
+            and caption_strategy.get("render_generated_captions", True)
+            and ass_captions
+        ):
+            ass_path = ass_captions.generate_ass(transcript_raw, seg_start, seg_end, visual_plan)
+            caption_filters.append(
+                f"subtitles='{ass_captions.escape_subtitles_path(ass_path)}'"
+            )
+        elif transcript_raw and caption_strategy.get("render_generated_captions", True):
             for entry in transcript_raw:
                 if isinstance(entry, dict):
                     e_start = entry.get("start", 0)
@@ -289,10 +350,20 @@ def process_for_shorts(input_path: str, output_path: str,
                         caption_filters.append(cap_f)
 
         # ── Assemble all overlay filters ──────────────────────────────────────
-        all_overlays = (
-            [thumb_filter, hook_filter, sub_filter, bridge_filter, cta_filter]
-            + caption_filters[:35]  # Cap to prevent command-line overflow
-        )
+        if visual_plan:
+            # Visual-retention mode owns the CTA lane. Do not stack the legacy
+            # bridge/affiliate CTAs over it.
+            all_overlays = (
+                [thumb_filter, hook_filter]
+                + caption_filters[:35]
+                + [follow_filter]
+            )
+        else:
+            all_overlays = (
+                [thumb_filter, hook_filter]
+                + caption_filters[:35]  # Cap fallback drawtext captions to prevent command-line overflow
+                + [bridge_filter, cta_filter]
+            )
         overlay_chain = ",".join(all_overlays)
 
         # Compose the final complex filter:
@@ -326,8 +397,24 @@ def process_for_shorts(input_path: str, output_path: str,
         cmd.insert(-1, "65")              # Quality factor for VideoToolbox
 
     print(f"Video Processor: Rendering with {video_encoder}...")
-    subprocess.run(cmd, check=True)
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError:
+        if video_encoder != "libx264":
+            print(f"Video Processor: {video_encoder} failed. Retrying with libx264 CPU encoder...")
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            fallback_cmd = _replace_encoder(cmd, video_encoder, "libx264")
+            subprocess.run(fallback_cmd, check=True)
+            video_encoder = "libx264"
+        else:
+            raise
     print(f"Video Processor: ✅ Output ready → {output_path}")
+    return {
+        "caption_detection": caption_detection,
+        "caption_strategy": caption_strategy,
+        "visual_plan": visual_plan,
+    }
 
 
 # ──────────────── SRT Generator — PRESERVED & EXTENDED ───────────────────────
@@ -379,7 +466,8 @@ def create_short(url: str, start_time: str, end_time: str,
                  bridge_text: str, output_path: str,
                  hook_text: str = "", transcript_raw: list = None,
                  cta_overlay_text: str = "Want this tool? Link in bio 👆",
-                 affiliate_link: str = "") -> str:
+                 affiliate_link: str = "",
+                 visual_plan: dict = None) -> str:
     """
     Orchestrates download + Shorts processing for a single clip.
     Returns the output_path on success.
@@ -392,13 +480,17 @@ def create_short(url: str, start_time: str, end_time: str,
             os.remove(p)
 
     download_video_section(url, "0", "0", raw_path)
-    process_for_shorts(
+    render_context = process_for_shorts(
         raw_path, output_path,
         start_time, end_time,
         bridge_text, hook_text,
         transcript_raw,
         cta_overlay_text,
         affiliate_link,
+        visual_plan,
     )
 
-    return output_path
+    return {
+        "output_path": output_path,
+        **(render_context or {}),
+    }

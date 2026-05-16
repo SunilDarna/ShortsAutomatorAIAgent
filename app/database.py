@@ -6,6 +6,7 @@ Tracks asset lineage, performance data, and hook-efficiency scoring.
 import sqlite3
 import os
 import datetime
+import json
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pipeline.db")
 
@@ -77,11 +78,100 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_clips_parent ON Shorts_Clips(Parent_URL);
         CREATE INDEX IF NOT EXISTS idx_clips_status ON Shorts_Clips(Status);
         CREATE INDEX IF NOT EXISTS idx_perf_clip ON Performance_Log(Clip_ID);
+
+        CREATE TABLE IF NOT EXISTS Source_Intelligence (
+            Original_URL       TEXT PRIMARY KEY,
+            Channel_ID         TEXT,
+            Source_Title       TEXT,
+            Duration           REAL DEFAULT 0.0,
+            View_Count         INTEGER DEFAULT 0,
+            Like_Count         INTEGER DEFAULT 0,
+            Comment_Count      INTEGER DEFAULT 0,
+            Age_Hours          REAL DEFAULT 0.0,
+            Velocity_Score     REAL DEFAULT 0.0,
+            Authority_Score    REAL DEFAULT 0.0,
+            Raw_Metadata_JSON  TEXT,
+            Recorded_At        TIMESTAMP DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS Candidate_Segments (
+            Candidate_ID       TEXT PRIMARY KEY,
+            Parent_URL         TEXT NOT NULL,
+            Start_Time         REAL NOT NULL,
+            End_Time           REAL NOT NULL,
+            Topic              TEXT,
+            Virality_Score     REAL DEFAULT 0.0,
+            Transcript_Score   REAL DEFAULT 0.0,
+            Source_Score       REAL DEFAULT 0.0,
+            Novelty_Score      REAL DEFAULT 0.0,
+            Feature_JSON       TEXT,
+            Status             TEXT DEFAULT 'ranked',
+            Created_At         TIMESTAMP DEFAULT (datetime('now')),
+            FOREIGN KEY (Parent_URL) REFERENCES Source_Media(Original_URL)
+        );
+
+        CREATE TABLE IF NOT EXISTS Render_QA (
+            Clip_ID            TEXT PRIMARY KEY,
+            Width              INTEGER DEFAULT 0,
+            Height             INTEGER DEFAULT 0,
+            Duration           REAL DEFAULT 0.0,
+            Has_Audio          INTEGER DEFAULT 0,
+            Burned_In_Captions INTEGER DEFAULT 0,
+            Caption_Zone       TEXT,
+            Passed             INTEGER DEFAULT 0,
+            Warnings_JSON      TEXT,
+            Checked_At         TIMESTAMP DEFAULT (datetime('now')),
+            FOREIGN KEY (Clip_ID) REFERENCES Shorts_Clips(Clip_ID)
+        );
+
+        CREATE TABLE IF NOT EXISTS Schedule_Performance (
+            Slot_ID             INTEGER PRIMARY KEY AUTOINCREMENT,
+            Clip_ID             TEXT,
+            Geography           TEXT,
+            Local_Hour          INTEGER,
+            Weekday             INTEGER,
+            Topic               TEXT,
+            Publish_At_UTC      TEXT,
+            Views_24h           INTEGER DEFAULT 0,
+            Avg_View_Percentage REAL DEFAULT 0.0,
+            Subscribers_Gained  INTEGER DEFAULT 0,
+            Score               REAL DEFAULT 0.0,
+            Recorded_At         TIMESTAMP DEFAULT (datetime('now')),
+            FOREIGN KEY (Clip_ID) REFERENCES Shorts_Clips(Clip_ID)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_candidate_parent ON Candidate_Segments(Parent_URL);
+        CREATE INDEX IF NOT EXISTS idx_candidate_score ON Candidate_Segments(Virality_Score);
+        CREATE INDEX IF NOT EXISTS idx_schedule_geo_hour ON Schedule_Performance(Geography, Local_Hour);
     """)
+
+    _ensure_clip_columns(conn)
 
     conn.commit()
     conn.close()
     print("DB: Schema initialized successfully.")
+
+
+def _column_exists(conn, table: str, column: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(row["name"] == column for row in rows)
+
+
+def _ensure_column(conn, table: str, column: str, ddl: str):
+    if not _column_exists(conn, table, column):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
+def _ensure_clip_columns(conn):
+    """Add new intelligence columns without rebuilding existing user data."""
+    _ensure_column(conn, "Shorts_Clips", "Candidate_ID", "TEXT")
+    _ensure_column(conn, "Shorts_Clips", "Candidate_Score", "REAL DEFAULT 0.0")
+    _ensure_column(conn, "Shorts_Clips", "Source_Score", "REAL DEFAULT 0.0")
+    _ensure_column(conn, "Shorts_Clips", "Topic", "TEXT")
+    _ensure_column(conn, "Shorts_Clips", "Geography", "TEXT")
+    _ensure_column(conn, "Shorts_Clips", "Schedule_Slot_UTC", "TEXT")
+    _ensure_column(conn, "Shorts_Clips", "Render_QA_Status", "TEXT")
+    _ensure_column(conn, "Shorts_Clips", "Failure_Reason", "TEXT")
 
 # ─────────────────────────── Source Media ────────────────────────────────────
 
@@ -120,16 +210,25 @@ def is_segment_overlapping(parent_url: str, new_start: float, new_end: float) ->
     return row["cnt"] > 0
 
 def insert_clip(clip_id: str, parent_url: str, start: float, end: float,
-                hook_type: str = "", hook_text: str = "", title: str = "") -> bool:
+                hook_type: str = "", hook_text: str = "", title: str = "",
+                candidate_id: str = "", candidate_score: float = 0.0,
+                source_score: float = 0.0, topic: str = "",
+                geography: str = "", schedule_slot_utc: str = "") -> bool:
     """Stage a new clip. Returns False if it would overlap with existing clips."""
     if is_segment_overlapping(parent_url, start, end):
         return False
     conn = _connect()
     conn.execute("""
         INSERT INTO Shorts_Clips (Clip_ID, Parent_URL, Start_Time, End_Time,
-                                  Hook_Type, Hook_Text, Title, Status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
-    """, (clip_id, parent_url, start, end, hook_type, hook_text, title))
+                                  Hook_Type, Hook_Text, Title, Status,
+                                  Candidate_ID, Candidate_Score, Source_Score,
+                                  Topic, Geography, Schedule_Slot_UTC)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
+    """, (
+        clip_id, parent_url, start, end, hook_type, hook_text, title,
+        candidate_id, candidate_score, source_score, topic, geography,
+        schedule_slot_utc,
+    ))
     conn.commit()
     conn.close()
     return True
@@ -149,12 +248,47 @@ def update_clip_status(clip_id: str, status: str, youtube_id: str = None):
     conn.commit()
     conn.close()
 
+
+def update_clip_schedule(clip_id: str, publish_at_utc: str = "", geography: str = ""):
+    conn = _connect()
+    conn.execute("""
+        UPDATE Shorts_Clips
+        SET Schedule_Slot_UTC = COALESCE(NULLIF(?, ''), Schedule_Slot_UTC),
+            Geography = COALESCE(NULLIF(?, ''), Geography)
+        WHERE Clip_ID = ?
+    """, (publish_at_utc, geography, clip_id))
+    conn.commit()
+    conn.close()
+
+
+def update_clip_failure(clip_id: str, reason: str):
+    conn = _connect()
+    conn.execute("""
+        UPDATE Shorts_Clips
+        SET Status = 'failed', Failure_Reason = ?
+        WHERE Clip_ID = ?
+    """, (reason, clip_id))
+    conn.commit()
+    conn.close()
+
 def get_pending_clips():
     """Return all clips in 'pending' status."""
     conn = _connect()
     rows = conn.execute(
         "SELECT * FROM Shorts_Clips WHERE Status = 'pending' ORDER BY Clip_ID ASC"
     ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_published_clips(limit: int = 50):
+    conn = _connect()
+    rows = conn.execute("""
+        SELECT * FROM Shorts_Clips
+        WHERE Status = 'published' AND YouTube_ID IS NOT NULL
+        ORDER BY Publish_Date DESC, Clip_ID DESC
+        LIMIT ?
+    """, (limit,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -171,6 +305,156 @@ def log_performance(clip_id: str, views_24h: int = 0, stayed_rate: float = 0.0,
     """, (clip_id, views_24h, stayed_rate, apv, replay_rate, subs_gained))
     conn.commit()
     conn.close()
+
+
+def upsert_source_intelligence(parent_url: str, metadata: dict):
+    """Store source-level ranking signals collected before clip selection."""
+    conn = _connect()
+    conn.execute("""
+        INSERT INTO Source_Intelligence (
+            Original_URL, Channel_ID, Source_Title, Duration, View_Count,
+            Like_Count, Comment_Count, Age_Hours, Velocity_Score,
+            Authority_Score, Raw_Metadata_JSON, Recorded_At
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(Original_URL) DO UPDATE SET
+            Channel_ID = excluded.Channel_ID,
+            Source_Title = excluded.Source_Title,
+            Duration = excluded.Duration,
+            View_Count = excluded.View_Count,
+            Like_Count = excluded.Like_Count,
+            Comment_Count = excluded.Comment_Count,
+            Age_Hours = excluded.Age_Hours,
+            Velocity_Score = excluded.Velocity_Score,
+            Authority_Score = excluded.Authority_Score,
+            Raw_Metadata_JSON = excluded.Raw_Metadata_JSON,
+            Recorded_At = datetime('now')
+    """, (
+        parent_url,
+        metadata.get("channel_id", ""),
+        metadata.get("title", ""),
+        float(metadata.get("duration", 0) or 0),
+        int(metadata.get("view_count", 0) or 0),
+        int(metadata.get("like_count", 0) or 0),
+        int(metadata.get("comment_count", 0) or 0),
+        float(metadata.get("age_hours", 0) or 0),
+        float(metadata.get("velocity_score", 0) or 0),
+        float(metadata.get("authority_score", 0) or 0),
+        json.dumps(metadata, default=str),
+    ))
+    conn.commit()
+    conn.close()
+
+
+def insert_candidate_segments(parent_url: str, candidates: list):
+    """Replace ranked candidate rows for a parent video with the latest scoring run."""
+    conn = _connect()
+    conn.execute("DELETE FROM Candidate_Segments WHERE Parent_URL = ?", (parent_url,))
+    for candidate in candidates:
+        conn.execute("""
+            INSERT INTO Candidate_Segments (
+                Candidate_ID, Parent_URL, Start_Time, End_Time, Topic,
+                Virality_Score, Transcript_Score, Source_Score, Novelty_Score,
+                Feature_JSON, Status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            candidate.get("candidate_id"),
+            parent_url,
+            float(candidate.get("start", 0) or 0),
+            float(candidate.get("end", 0) or 0),
+            candidate.get("topic", ""),
+            float(candidate.get("virality_score", 0) or 0),
+            float(candidate.get("transcript_score", 0) or 0),
+            float(candidate.get("source_score", 0) or 0),
+            float(candidate.get("novelty_score", 0) or 0),
+            json.dumps(candidate.get("features", {}), default=str),
+            candidate.get("status", "ranked"),
+        ))
+    conn.commit()
+    conn.close()
+
+
+def log_render_qa(clip_id: str, qa: dict):
+    conn = _connect()
+    conn.execute("""
+        INSERT INTO Render_QA (
+            Clip_ID, Width, Height, Duration, Has_Audio,
+            Burned_In_Captions, Caption_Zone, Passed, Warnings_JSON, Checked_At
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(Clip_ID) DO UPDATE SET
+            Width = excluded.Width,
+            Height = excluded.Height,
+            Duration = excluded.Duration,
+            Has_Audio = excluded.Has_Audio,
+            Burned_In_Captions = excluded.Burned_In_Captions,
+            Caption_Zone = excluded.Caption_Zone,
+            Passed = excluded.Passed,
+            Warnings_JSON = excluded.Warnings_JSON,
+            Checked_At = datetime('now')
+    """, (
+        clip_id,
+        int(qa.get("width", 0) or 0),
+        int(qa.get("height", 0) or 0),
+        float(qa.get("duration", 0) or 0),
+        1 if qa.get("has_audio") else 0,
+        1 if qa.get("burned_in_captions") else 0,
+        qa.get("caption_zone", ""),
+        1 if qa.get("passed") else 0,
+        json.dumps(qa.get("warnings", []), default=str),
+    ))
+    status = "passed" if qa.get("passed") else "failed"
+    conn.execute("""
+        UPDATE Shorts_Clips
+        SET Render_QA_Status = ?
+        WHERE Clip_ID = ?
+    """, (status, clip_id))
+    conn.commit()
+    conn.close()
+
+
+def log_schedule_performance(clip_id: str, geography: str, local_hour: int,
+                             weekday: int, topic: str, publish_at_utc: str,
+                             views_24h: int = 0, avg_view_percentage: float = 0.0,
+                             subscribers_gained: int = 0):
+    score = (views_24h / 1000.0) + avg_view_percentage + (subscribers_gained * 5)
+    conn = _connect()
+    conn.execute("""
+        INSERT INTO Schedule_Performance (
+            Clip_ID, Geography, Local_Hour, Weekday, Topic, Publish_At_UTC,
+            Views_24h, Avg_View_Percentage, Subscribers_Gained, Score
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        clip_id, geography, local_hour, weekday, topic, publish_at_utc,
+        views_24h, avg_view_percentage, subscribers_gained, score,
+    ))
+    conn.commit()
+    conn.close()
+
+
+def get_schedule_slot_report(geography: str = "", limit: int = 12) -> list:
+    conn = _connect()
+    params = []
+    where = ""
+    if geography:
+        where = "WHERE Geography = ?"
+        params.append(geography)
+    rows = conn.execute(f"""
+        SELECT Geography, Local_Hour, COUNT(*) AS sample_count,
+               AVG(Views_24h) AS avg_views_24h,
+               AVG(Avg_View_Percentage) AS avg_apv,
+               AVG(Subscribers_Gained) AS avg_subs,
+               AVG(Score) AS avg_score
+        FROM Schedule_Performance
+        {where}
+        GROUP BY Geography, Local_Hour
+        ORDER BY avg_score DESC, sample_count DESC
+        LIMIT ?
+    """, (*params, limit)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 # ─────────────────────────── Analytics & Intelligence ────────────────────────
 
@@ -214,14 +498,14 @@ def get_bottom_performers(threshold_pct: float = 20.0) -> list:
         FROM Performance_Log pl
         JOIN Shorts_Clips sc ON pl.Clip_ID = sc.Clip_ID
         GROUP BY sc.Clip_ID
-        HAVING avg_apv < (
-            SELECT PERCENTILE_CONT(?) WITHIN GROUP (ORDER BY APV_Percentage)
-            FROM Performance_Log
-        )
         ORDER BY avg_apv ASC
-    """, (threshold_pct / 100.0,)).fetchall()
+    """).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    data = [dict(r) for r in rows]
+    if not data:
+        return []
+    cutoff_count = max(1, int(len(data) * (threshold_pct / 100.0)))
+    return data[:cutoff_count]
 
 def get_all_used_segments(parent_url: str) -> list:
     """Return all extracted segments for a given source video (for overlap checks)."""

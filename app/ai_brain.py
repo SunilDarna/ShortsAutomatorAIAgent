@@ -1,6 +1,6 @@
 """
 ai_brain.py — Phase 3: Two-Pass Viral Hook Engine + Sourcing
-v2.0 — Full implementation of the Two-Pass LLM Narrative Framework.
+v3.0 — Full implementation of the Two-Pass LLM Narrative Framework.
 
 Pass 1: Semantic Mapping — Extract 3-5 high-value, contextually independent segments.
 Pass 2: Hook & Loop Engineering — Engineer a "pattern interrupt" hook and seamless loop.
@@ -224,7 +224,8 @@ OUTPUT: Return ONLY a valid JSON array with no markdown. Example:
 ]"""
 
 
-def _run_pass1(client, transcript: str, preferred_hook_type: str = None, used_segments: list = None) -> list:
+def _run_pass1(client, transcript: str, preferred_hook_type: str = None,
+               used_segments: list = None, candidate_brief: str = "") -> list:
     """
     Pass 1: Semantic Heatmapping.
     Identifies 3-5 high-value, contextually independent segments from the transcript.
@@ -241,7 +242,16 @@ def _run_pass1(client, transcript: str, preferred_hook_type: str = None, used_se
             e_str = seconds_to_mmss(seg["End_Time"])
             avoid_bias += f"- {s_str} to {e_str}\n"
 
-    prompt = f"""{PASS1_SYSTEM_PROMPT}{hook_bias}{avoid_bias}
+    candidate_context = ""
+    if candidate_brief:
+        candidate_context = f"""
+EVIDENCE-BACKED CANDIDATE WINDOWS:
+These windows were pre-ranked by source velocity, transcript signals, novelty, and replay potential.
+Prefer these ranges unless the transcript proves a clearly stronger nearby moment.
+{candidate_brief}
+"""
+
+    prompt = f"""{PASS1_SYSTEM_PROMPT}{hook_bias}{avoid_bias}{candidate_context}
 
 Analyze this transcript and identify the 3-5 most viral-worthy segments.
 Return ONLY valid JSON.
@@ -440,7 +450,8 @@ def _validate_hook(client, task: dict) -> bool:
 
 def extract_task_with_llm(video_url: str, transcript: str,
                           llm_api_key: str, affiliate_offers: dict,
-                          preferred_hook_type: str = None, used_segments: list = None) -> dict:
+                          preferred_hook_type: str = None, used_segments: list = None,
+                          ranked_candidates: list = None) -> dict:
     """
     TWO-PASS VIRAL HOOK ENGINE with Validation Agent.
 
@@ -451,9 +462,16 @@ def extract_task_with_llm(video_url: str, transcript: str,
     Returns the complete task dict ready for video_processor.
     """
     client = genai.Client(api_key=llm_api_key)
+    candidate_brief = ""
+    if ranked_candidates:
+        try:
+            from app import content_scorer
+        except ImportError:
+            import content_scorer
+        candidate_brief = content_scorer.candidates_for_prompt(ranked_candidates)
 
     # ── Pass 1 ────────────────────────────────────────────────────────────────
-    concepts = _run_pass1(client, transcript, preferred_hook_type, used_segments)
+    concepts = _run_pass1(client, transcript, preferred_hook_type, used_segments, candidate_brief)
     if not concepts:
         raise Exception("Pass 1 returned no concepts.")
 
@@ -561,4 +579,3 @@ Return ONLY valid JSON in this format:
             "utc_offset": "+0530",
             "reasoning": "Fallback defaults."
         }
-

@@ -60,6 +60,17 @@ def match_affiliate(script_text: str, offers: dict) -> dict:
     print(f"Metadata: Matched affiliate '{offer['name']}' for category '{best_category}'.")
     return offer
 
+
+def match_affiliate_by_name(name: str, offers: dict) -> dict:
+    """Honor a valid LLM affiliate suggestion if it exists in the configured offers."""
+    if not name or not offers:
+        return {}
+    name_lower = name.lower().strip()
+    for offer in offers.values():
+        if offer.get("name", "").lower().strip() == name_lower:
+            return offer
+    return {}
+
 # ──────────────── Metadata Assembly ──────────────────────────────────────────
 
 def build_metadata(task: dict, affiliate_offers: dict, script_text: str = "", scheduling_recommendation: dict = None) -> dict:
@@ -67,7 +78,19 @@ def build_metadata(task: dict, affiliate_offers: dict, script_text: str = "", sc
     Assemble the complete upload metadata package for a clip.
     scheduling_recommendation comes from the LLM (geography, time_of_day, timezone).
     """
-    offer = match_affiliate(script_text or task.get("hook_text", ""), affiliate_offers)
+    offer = (
+        match_affiliate_by_name(task.get("suggested_affiliate", ""), affiliate_offers)
+        or match_affiliate(
+            " ".join([
+                script_text or "",
+                task.get("title", ""),
+                task.get("hook_text", ""),
+                task.get("affiliate_pain_point", ""),
+                " ".join(task.get("tags", [])),
+            ]),
+            affiliate_offers,
+        )
+    )
 
     title    = task.get("title", "AI Just Changed Everything #Shorts")
     hook     = task.get("hook_text", "")
@@ -118,6 +141,54 @@ def build_metadata(task: dict, affiliate_offers: dict, script_text: str = "", sc
     if scheduling_recommendation:
         metadata["scheduling_recommendation"] = scheduling_recommendation
 
+    return metadata
+
+
+def ensure_affiliate_consistency(metadata: dict, affiliate_offers: dict) -> dict:
+    """
+    Keep description, pinned comment, CTA, and affiliate fields aligned.
+
+    LLM-generated pinned comments can mention a different offer than the local
+    matcher. This function makes the local offer the single source of truth.
+    """
+    affiliate_name = metadata.get("affiliate_name", "")
+    offer = match_affiliate_by_name(affiliate_name, affiliate_offers)
+    if not offer and affiliate_offers:
+        offer = match_affiliate(
+            " ".join([
+                metadata.get("title", ""),
+                metadata.get("hook_text", ""),
+                metadata.get("bridge_text", ""),
+                " ".join(metadata.get("tags", [])),
+            ]),
+            affiliate_offers,
+        )
+    if not offer:
+        return metadata
+
+    hook = metadata.get("hook_text", "")
+    tags = metadata.get("tags", [])
+    affiliate_line = f"Get {offer['name']}: {offer['link']}"
+    description = (
+        f"{affiliate_line}\n"
+        f"{hook}\n\n"
+        f"This clip explains a practical business or AI insight. "
+        f"{offer['name']} matches the core pain point: {offer['problem_solved']}.\n\n"
+        f"Subscribe for daily AI and business insights.\n\n"
+        f"#{' #'.join(tags[:5]) if tags else 'AI #Shorts #Business #Automation #Tech'}\n\n"
+        f"Edited with AI assistance. Educational purposes only."
+    )
+    metadata.update({
+        "affiliate_name": offer["name"],
+        "affiliate_link": offer["link"],
+        "description": description,
+        "youtube_description": description,
+        "pinned_comment": (
+            f"Want the tool that fits this workflow? {offer['name']} helps with "
+            f"{offer['problem_solved']}: {offer['link']}"
+        ),
+        "cta_overlay_text": "Tool link in bio",
+    })
     return metadata
 
 def save_metadata_json(metadata: dict, output_path: str):

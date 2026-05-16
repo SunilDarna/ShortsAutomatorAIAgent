@@ -1,5 +1,5 @@
 """
-local_production_pipeline.py — v2.0 Master Orchestrator
+local_production_pipeline.py — v3.0 Master Orchestrator
 Event-driven pipeline replacing the linear stateless model.
 
 Architecture:
@@ -26,6 +26,8 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from app import ai_brain, video_processor, youtube_uploader
 from app import database, metadata_builder
+from app import content_scorer, smart_scheduler, caption_intelligence, youtube_analytics
+from app import visual_retention
 
 # ── File Configuration ────────────────────────────────────────────────────────
 SECRETS_FILE   = "local_secrets.json"
@@ -112,6 +114,27 @@ def produce():
             if used_segments:
                 print(f"Pipeline: Found {len(used_segments)} previously used segments for this video. Instructing AI to avoid them.")
 
+            source_metadata = content_scorer.collect_source_metadata(temp_url)
+            if source_metadata.get("error"):
+                print(f"Pipeline: Source intelligence unavailable: {source_metadata['error']}")
+                source_metadata = {"url": temp_url, "title": temp_title, "source_score": 0.0}
+            database.upsert_source_intelligence(temp_url, source_metadata)
+
+            ranked_candidates = content_scorer.build_ranked_candidates(
+                temp_transcript_raw,
+                temp_url,
+                source_metadata=source_metadata,
+                used_segments=used_segments,
+                limit=8,
+            )
+            if ranked_candidates:
+                database.insert_candidate_segments(temp_url, ranked_candidates)
+                print(
+                    "Pipeline: Top candidate score "
+                    f"{ranked_candidates[0]['virality_score']} at "
+                    f"{ranked_candidates[0]['start_time']}–{ranked_candidates[0]['end_time']}"
+                )
+
             # ── Two-Pass LLM + DB Overlap Guard (up to 5 attempts per video) ────────
             found_task = False
             for attempt in range(5):
@@ -121,7 +144,8 @@ def produce():
                         temp_url, transcript_text,
                         secrets.get("llm_api_key", ""), affiliate_offers,
                         preferred_hook_type=preferred_hook,
-                        used_segments=used_segments
+                        used_segments=used_segments,
+                        ranked_candidates=ranked_candidates,
                     )
 
                     s = ai_brain.parse_seconds(potential_task["start_time"])
@@ -134,8 +158,16 @@ def produce():
                         continue
 
                     task = potential_task
+                    matched_candidate = content_scorer.find_matching_candidate(task, ranked_candidates)
+                    if matched_candidate:
+                        task["candidate_id"] = matched_candidate.get("candidate_id", "")
+                        task["candidate_score"] = matched_candidate.get("virality_score", 0.0)
+                        task["source_score"] = matched_candidate.get("source_score", source_metadata.get("source_score", 0.0))
+                        task["topic"] = matched_candidate.get("topic", "")
+                        task["candidate_features"] = matched_candidate.get("features", {})
                     transcript_raw = temp_transcript_raw
                     task["transcript_raw"] = transcript_raw
+                    task["source_metadata"] = source_metadata
                     video_url = temp_url
                     video_title = temp_title
                     found_task = True
@@ -167,7 +199,12 @@ def produce():
             return False
 
     # Register source in DB now that we have a valid task
-    database.upsert_source_media(video_url, video_title)
+    database.upsert_source_media(
+        video_url,
+        video_title,
+        duration=int(task.get("source_metadata", {}).get("duration", 0) or 0),
+        channel_id=task.get("source_metadata", {}).get("channel_id", ""),
+    )
 
     # ── Generate clip ID + file paths ─────────────────────────────────────────
     clip_id        = _generate_clip_id()
@@ -206,12 +243,27 @@ def produce():
         "pinned_comment":    task.get("pinned_comment", full_metadata.get("pinned_comment", "")),
         "visual_prompts":    task.get("visual_prompts", []),
         "title":             task.get("title", full_metadata["title"]),
+        "candidate_id":      task.get("candidate_id", ""),
+        "candidate_score":   task.get("candidate_score", 0.0),
+        "source_score":      task.get("source_score", 0.0),
+        "topic":             task.get("topic", ""),
+        "candidate_features": task.get("candidate_features", {}),
     })
-    # Ensure uploader-compatible description key
-    full_metadata["youtube_description"] = full_metadata.get("description", "")
+    full_metadata = metadata_builder.ensure_affiliate_consistency(full_metadata, affiliate_offers)
+    full_metadata["scheduling_recommendation"] = smart_scheduler.normalize_recommendation(
+        full_metadata.get("scheduling_recommendation"),
+        title=full_metadata.get("title", ""),
+        tags=full_metadata.get("tags", []),
+    )
+    clip_duration = ai_brain.parse_seconds(task["end_time"]) - ai_brain.parse_seconds(task["start_time"])
+    visual_plan = visual_retention.plan_visuals(full_metadata, clip_duration)
+    full_metadata["visual_retention"] = {
+        key: value for key, value in visual_plan.items()
+        if key != "caption_style_pack"
+    }
 
     # ── Stage clip in SQLite ──────────────────────────────────────────────────
-    database.insert_clip(
+    inserted = database.insert_clip(
         clip_id     = clip_id,
         parent_url  = video_url,
         start       = ai_brain.parse_seconds(task["start_time"]),
@@ -219,11 +271,19 @@ def produce():
         hook_type   = task.get("hook_type", ""),
         hook_text   = task.get("hook_text", ""),
         title       = full_metadata["title"],
+        candidate_id= task.get("candidate_id", ""),
+        candidate_score=float(task.get("candidate_score", 0.0) or 0.0),
+        source_score=float(task.get("source_score", 0.0) or 0.0),
+        topic       = task.get("topic", ""),
+        geography   = full_metadata.get("scheduling_recommendation", {}).get("geography", ""),
     )
+    if not inserted:
+        print("Pipeline: DB rejected clip because it overlaps an existing segment.")
+        return False
 
     # ── Render Video ──────────────────────────────────────────────────────────
     try:
-        video_processor.create_short(
+        render_context = video_processor.create_short(
             url           = video_url,
             start_time    = task["start_time"],
             end_time      = task["end_time"],
@@ -233,10 +293,27 @@ def produce():
             transcript_raw= transcript_raw,
             cta_overlay_text = full_metadata.get("cta_overlay_text", "Want this tool? Link in bio 👆"),
             affiliate_link= full_metadata.get("affiliate_link", ""),
+            visual_plan = visual_plan,
         )
     except Exception as e:
-        database.update_clip_status(clip_id, "failed")
+        database.update_clip_failure(clip_id, str(e))
         print(f"Render failed: {e}")
+        return False
+
+    caption_detection = (render_context or {}).get("caption_detection", {})
+    qa = caption_intelligence.run_render_qa(
+        output_path,
+        expected_min_duration=30.0,
+        expected_max_duration=60.5,
+        burned_in_captions=bool(caption_detection.get("burned_in_captions")),
+        caption_zone=caption_detection.get("caption_zone", "none"),
+    )
+    database.log_render_qa(clip_id, qa)
+    full_metadata["render_qa"] = qa
+    full_metadata["caption_detection"] = caption_detection
+    if not qa.get("passed"):
+        database.update_clip_failure(clip_id, "; ".join(qa.get("warnings", [])))
+        print(f"Render QA failed: {qa.get('warnings', [])}")
         return False
 
     # ── Generate SRT for SEO ──────────────────────────────────────────────────
@@ -312,53 +389,19 @@ def sync():
             )
             print(f"Pipeline: Current schedule queue has {len(queue)} videos.")
             
-            # Find next valid slot
-            from datetime import datetime, timedelta, timezone
-            
-            # 1. Parse slots and timezone
-            slots = scheduling_rec.get("recommended_slots", ["09:00", "15:00", "21:00"])
-            offset_str = scheduling_rec.get("utc_offset", "+0000").replace(":", "")
-            sign = -1 if offset_str.startswith("-") else 1
-            offset_hours = int(offset_str[1:3])
-            offset_mins = int(offset_str[3:5])
-            tz = timezone(timedelta(hours=sign * offset_hours, minutes=sign * offset_mins))
-
-            # 2. Get latest scheduled time (UTC)
-            now_utc = datetime.now(timezone.utc)
-            latest_scheduled_utc = now_utc
-            if queue:
-                queue_latest = datetime.strptime(queue[-1].replace("Z", "+0000"), "%Y-%m-%dT%H:%M:%S%z")
-                if queue_latest > latest_scheduled_utc:
-                    latest_scheduled_utc = queue_latest
-
-            # 3. Define 5 hour gap
-            MIN_GAP_HOURS = 5
-            min_allowed_utc = latest_scheduled_utc + timedelta(hours=MIN_GAP_HOURS)
-
-            # 4. Find the next available slot
-            current_date_in_tz = latest_scheduled_utc.astimezone(tz)
-            found_slot = None
-            
-            # Search over the next 30 days
-            for day_offset in range(30):
-                check_day = current_date_in_tz + timedelta(days=day_offset)
-                for slot_str in sorted(slots): # Sort slots to ensure chronological order (Morning -> Evening)
-                    try:
-                        h, m = map(int, slot_str.split(":"))
-                        candidate_slot = check_day.replace(hour=h, minute=m, second=0, microsecond=0)
-                        candidate_utc = candidate_slot.astimezone(timezone.utc)
-                        
-                        if candidate_utc >= min_allowed_utc:
-                            found_slot = candidate_utc
-                            break
-                    except:
-                        continue
-                if found_slot:
-                    break
-
-            if found_slot:
-                publish_at_iso = found_slot.strftime("%Y-%m-%dT%H:%M:%SZ")
-                print(f"Pipeline: Final computed schedule: {publish_at_iso} UTC")
+            history = database.get_schedule_slot_report(
+                scheduling_rec.get("geography", ""),
+                limit=6,
+            )
+            slot_decision = smart_scheduler.choose_publish_slot(
+                scheduling_rec,
+                queue,
+                history=history,
+                min_gap_hours=5,
+            )
+            publish_at_iso = slot_decision["publish_at"]
+            meta["schedule_decision"] = slot_decision
+            print(f"Pipeline: Final computed schedule: {publish_at_iso} UTC")
             
         except Exception as e:
             print(f"Pipeline: Failed to calculate schedule from recommendation. Error: {e}")
@@ -376,11 +419,18 @@ def sync():
             category_id    = meta.get("category_id", "28"),
             srt_path       = srt_path if os.path.exists(srt_path) else None,
             publish_at     = publish_at_iso,
+            geography      = meta.get("schedule_decision", {}).get("geography", meta.get("scheduling_recommendation", {}).get("geography", "")),
         )
 
         # ── Update DB ─────────────────────────────────────────────────────────
         clip_id = meta.get("clip_id", base_name)
         database.update_clip_status(clip_id, "published", youtube_id)
+        if publish_at_iso:
+            database.update_clip_schedule(
+                clip_id,
+                publish_at_utc=publish_at_iso,
+                geography=meta.get("schedule_decision", {}).get("geography", ""),
+            )
 
         # ── Print actionable pinned comment ──────────────────────────────────
         print(f"\n📌 PINNED COMMENT (post manually in YouTube Studio):")
@@ -437,6 +487,55 @@ def review():
     print(f"\nDB Path: {database.DB_PATH}")
 
 
+def collect_analytics():
+    print(f"\n{'='*60}")
+    print(f"COLLECTING YOUTUBE ANALYTICS: {time.ctime()}")
+    print(f"{'='*60}")
+
+    secrets = load_json(SECRETS_FILE, {})
+    if not secrets:
+        print("Error: local_secrets.json not found.")
+        return False
+
+    clips = database.get_published_clips(limit=50)
+    if not clips:
+        print("No published clips with YouTube IDs found.")
+        return True
+
+    try:
+        metrics_rows = youtube_analytics.collect_for_clips(
+            secrets["youtube_client_id"],
+            secrets["youtube_client_secret"],
+            secrets["youtube_refresh_token"],
+            clips,
+            days_back=7,
+        )
+    except Exception as e:
+        print(f"Analytics collection failed: {e}")
+        return False
+
+    by_clip_id = {clip["Clip_ID"]: clip for clip in clips}
+    for metrics in metrics_rows:
+        clip_id = metrics.get("clip_id")
+        args = youtube_analytics.metrics_to_performance_args(metrics)
+        database.log_performance(clip_id, **args)
+        clip = by_clip_id.get(clip_id, {})
+        if clip.get("Schedule_Slot_UTC"):
+            database.log_schedule_performance(
+                clip_id=clip_id,
+                geography=clip.get("Geography") or "Unknown",
+                local_hour=0,
+                weekday=0,
+                topic=clip.get("Topic") or "",
+                publish_at_utc=clip.get("Schedule_Slot_UTC"),
+                views_24h=args["views_24h"],
+                avg_view_percentage=args["apv"],
+                subscribers_gained=args["subs_gained"],
+            )
+    print(f"Analytics: Logged {len(metrics_rows)} performance snapshots.")
+    return True
+
+
 # ── run_immediate() ────────────────────────────────────────────────────────────
 
 def run_immediate(force: bool = False):
@@ -449,16 +548,17 @@ def run_immediate(force: bool = False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="ShortsAutomatorAIAgent v2.0 — Autonomous Affiliate Pipeline"
+        description="ShortsAutomatorAIAgent v3.0 — Autonomous Visual Retention Pipeline"
     )
     parser.add_argument(
         "action",
-        choices=["produce", "sync", "run", "review"],
+        choices=["produce", "sync", "run", "review", "collect-analytics"],
         help=(
             "produce: source + render a new Short | "
             "sync: upload pending Shorts to YouTube | "
             "run: produce + sync in sequence | "
-            "review: print Hook Efficiency analytics report"
+            "review: print Hook Efficiency analytics report | "
+            "collect-analytics: ingest YouTube Analytics for published clips"
         )
     )
     parser.add_argument(
@@ -477,3 +577,5 @@ if __name__ == "__main__":
         run_immediate(force=args.force)
     elif args.action == "review":
         review()
+    elif args.action == "collect-analytics":
+        collect_analytics()

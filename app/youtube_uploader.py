@@ -66,7 +66,25 @@ def get_schedule_queue(client_id, client_secret, refresh_token):
     scheduled_times.sort()
     return scheduled_times
 
-def upload_to_youtube(video_path, title, description, client_id, client_secret, refresh_token, tags=None, category_id="27", srt_path=None, publish_at=None):
+def _recording_location_for_geography(geography: str):
+    geo = (geography or "").lower()
+    if "india" in geo:
+        return {
+            "location": {"latitude": 20.5937, "longitude": 78.9629},
+            "locationDescription": "India",
+        }
+    if "united states" in geo or "usa" in geo or "america" in geo:
+        return {
+            "location": {"latitude": 37.0902, "longitude": -95.7129},
+            "locationDescription": "United States",
+        }
+    return {
+        "location": {"latitude": 0.0, "longitude": 0.0},
+        "locationDescription": "Global",
+    }
+
+
+def upload_to_youtube(video_path, title, description, client_id, client_secret, refresh_token, tags=None, category_id="27", srt_path=None, publish_at=None, geography=""):
     print("Uploading to YouTube Shorts with SEO 2.0...")
     
     youtube = get_authenticated_youtube(client_id, client_secret, refresh_token)
@@ -85,13 +103,7 @@ def upload_to_youtube(video_path, title, description, client_id, client_secret, 
             "privacyStatus": "private",
             "selfDeclaredMadeForKids": False
         },
-        "recordingDetails": {
-            "location": {
-                "latitude": 37.0902, # USA Central
-                "longitude": -95.7129
-            },
-            "locationDescription": "United States"
-        }
+        "recordingDetails": _recording_location_for_geography(geography)
     }
     
     # Inject scheduling logic if publish_at is provided
